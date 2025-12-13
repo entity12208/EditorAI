@@ -1,0 +1,89 @@
+{
+  "geode": "4.10.0",
+  "gd": {
+    "win": "2.2074",
+    "android": "2.2074",
+    "mac": "2.2074",
+    "ios": "2.2074"
+  },
+  "id": "entity12208.edit-ai",
+  "name": "Editor AI",
+  "version": "v2.1.0",
+  "developer": "entity12208",
+  "description": "Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT.",
+  "settings": {
+    "ai-provider": {
+      "type": "string",
+      "name": "AI Provider",
+      "description": "Which AI service to use",
+      "default": "gemini",
+      "one-of": ["gemini", "claude", "openai"]
+    },
+    "model": {
+      "type": "string",
+      "name": "Model",
+      "description": "AI model to use",
+      "default": "gemini-1.5-flash",
+      "one-of": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash-lite",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo"
+      ]
+    },
+    "difficulty": {
+      "type": "string",
+      "name": "Difficulty",
+      "description": "Default difficulty level",
+      "default": "medium",
+      "one-of": ["easy", "medium", "hard", "extreme"]
+    },
+    "style": {
+      "type": "string",
+      "name": "Style",
+      "description": "Visual style preference",
+      "default": "modern",
+      "one-of": ["modern", "retro", "minimalist", "decorated"]
+    },
+    "length": {
+      "type": "string",
+      "name": "Length",
+      "description": "Approximate level length",
+      "default": "medium",
+      "one-of": ["short", "medium", "long", "xl", "xxl"]
+    },
+    "max-objects": {
+      "type": "int",
+      "name": "Max Objects",
+      "description": "Maximum objects per generation",
+      "default": 500,
+      "min": 10,
+      "max": 1000000
+    },
+    "api-key-info": {
+      "type": "title",
+      "name": "API Key Management"
+    },
+    "api-key-status": {
+      "type": "string",
+      "name": "Status",
+      "description": "Current API key status",
+      "default": "No API key saved",
+      "enableIf": "false"
+    }
+  },
+  "tags": [
+    "editor",
+    "utility",
+    "content"
+  ],
+  "links": {
+    "source": "https://github.com/entity12208/editor-ai",
+    "community": "https://discord.gg/geometrydash"
+  }
+}
