@@ -22,19 +22,19 @@ Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT wit
 ## Models
 
 **Gemini (FREE):**
-- gemini-1.5-flash (fast)
-- gemini-1.5-pro (quality)
-- gemini-2.0-flash-exp
+- gemini-2.5-flash (fast)
+- gemini-2.5-pro (quality)
+- gemini-2.5-flash-lite (cheap)
 
 **Claude (Paid):**
-- claude-3-5-sonnet (balanced)
-- claude-3-5-haiku (fast)
-- claude-3-opus (best)
+- claude-4-5-sonnet (balanced)
+- claude-4-5-haiku (fast)
+- claude-4.5-opus (best)
 
 **ChatGPT (Paid):**
-- gpt-4o (latest)
-- gpt-4o-mini (cheap)
-- gpt-4-turbo (balanced)
+- gpt-5.2 (latest)
+- gpt-5-mini (balanced)
+- gpt-5-nano (cheap)
 
 ## Settings
 
@@ -74,6 +74,9 @@ Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT wit
 
 ---
 
-**Developer:** entity12208  
+**Developer:** Entity12208  
 **Version:** 2.1.0  
 **Framework:** Geode SDK
+
+##### Disclaimer:
+This mod was partially AI generated. Please feel free to report bugs!

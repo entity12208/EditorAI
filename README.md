@@ -58,19 +58,19 @@ AI-powered level generation for Geometry Dash 2.2074. Generate complete levels d
 ## Available Models
 
 **Gemini:**
-- `gemini-1.5-flash` - Fast (default)
-- `gemini-1.5-pro` - High quality
-- `gemini-2.0-flash-exp` - Experimental
+- `gemini-2.5-flash` - Fast (default)
+- `gemini-2.5-pro` - High quality
+- `gemini-2.5-flash-lite` - Cheap
 
 **Claude:**
-- `claude-3-5-sonnet-20241022` - Balanced
-- `claude-3-5-haiku-20241022` - Fast
-- `claude-3-opus-20240229` - Best quality
+- `claude-4-5-sonnet` - Balanced
+- `claude-4-5-haiku` - Fast
+- `claude-4.5-opus` - Best quality
 
 **ChatGPT:**
-- `gpt-4o` - Latest
-- `gpt-4o-mini` - Fast & cheap
-- `gpt-4-turbo` - Balanced
+- `gpt-5.2` - Latest
+- `gpt-5-mini` - Balanced
+- `gpt-5-nano` - Cheap
 
 ## Features
 
@@ -143,3 +143,7 @@ Your key is stored locally and never transmitted except to your chosen AI provid
 ---
 
 **Generate levels with AI in seconds!** 🚀
+
+
+##### Disclaimer
+This was partially created with AI. Feel free to report bugs!
