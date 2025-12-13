@@ -23,7 +23,7 @@
       "type": "string",
       "name": "Model",
       "description": "AI model to use",
-      "default": "gemini-1.5-flash",
+      "default": "gemini-2.5-flash",
       "one-of": [
         "gemini-2.5-flash",
         "gemini-2.5-pro",
@@ -83,7 +83,7 @@
     "content"
   ],
   "links": {
-    "source": "https://github.com/entity12208/editor-ai",
+    "source": "https://github.com/Entity12208/EditorAI",
     "community": "https://discord.gg/geometrydash"
   }
 }

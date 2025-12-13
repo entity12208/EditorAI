@@ -57,6 +57,68 @@ static std::unordered_map<std::string, int> loadObjectIDs() {
 
 static std::unordered_map<std::string, int> OBJECT_IDS = loadObjectIDs();
 
+// Helper to mask API keys in logs
+static std::string maskApiKey(const std::string& key) {
+    if (key.length() <= 8) return "***";
+    return key.substr(0, 4) + "..." + key.substr(key.length() - 4);
+}
+
+// Parse API error and return user-friendly message
+static std::pair<std::string, std::string> parseAPIError(const std::string& errorBody, int statusCode) {
+    std::string title = "API Error";
+    std::string message = "An unknown error occurred. Please try again.";
+    
+    try {
+        auto json = matjson::parse(errorBody);
+        if (!json) return {title, message};
+        
+        auto error = json.unwrap();
+        
+        // Try to extract error message
+        std::string errorMsg;
+        if (error.contains("error")) {
+            auto errorObj = error["error"];
+            if (errorObj.contains("message")) {
+                auto msgResult = errorObj["message"].asString();
+                if (msgResult) errorMsg = msgResult.unwrap();
+            }
+        }
+        
+        // Handle specific error codes
+        if (statusCode == 401 || statusCode == 403) {
+            title = "Invalid API Key";
+            message = "Your API key is invalid or expired.\n\nPlease check your API key and try again.";
+        } else if (statusCode == 429) {
+            title = "Rate Limit Exceeded";
+            if (errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos) {
+                message = "You've exceeded your API quota.\n\n"
+                         "Please wait a few minutes or upgrade your plan.";
+            } else {
+                message = "Too many requests.\n\nPlease wait a moment and try again.";
+            }
+        } else if (statusCode == 400) {
+            title = "Invalid Request";
+            if (errorMsg.find("model") != std::string::npos) {
+                message = "The selected model is invalid.\n\nPlease check your model settings.";
+            } else {
+                message = "The request was invalid.\n\nPlease check your settings and try again.";
+            }
+        } else if (statusCode >= 500) {
+            title = "Service Error";
+            message = "The AI service is currently unavailable.\n\nPlease try again later.";
+        } else if (!errorMsg.empty()) {
+            // Use extracted message for other errors
+            message = errorMsg.substr(0, 200); // Truncate if too long
+            if (errorMsg.length() > 200) message += "...";
+        }
+        
+    } catch (...) {
+        // If parsing fails, use generic message
+    }
+    
+    return {title, message};
+}
+
 // API Key Entry Popup
 class APIKeyPopup : public Popup<std::function<void(std::string)>> {
 protected:
@@ -104,8 +166,9 @@ protected:
         );
         
         auto btnMenu = CCMenu::create();
-        saveBtn->setPosition({-60, -60});
-        cancelBtn->setPosition({60, -60});
+        btnMenu->setPosition({winSize.width / 2, winSize.height / 2 - 65});
+        saveBtn->setPosition({-50, 0});
+        cancelBtn->setPosition({50, 0});
         btnMenu->addChild(saveBtn);
         btnMenu->addChild(cancelBtn);
         m_mainLayer->addChild(btnMenu);
@@ -119,10 +182,10 @@ protected:
             m_callback(key);
             this->onClose(nullptr);
         } else {
-            FLAlertLayer::create("Error", "Please enter a valid API key", "OK")->show();
+            FLAlertLayer::create("Error", gd::string("Please enter a valid API key"), "OK")->show();
         }
     }
-    
+
 public:
     static APIKeyPopup* create(std::function<void(std::string)> callback) {
         auto ret = new APIKeyPopup();
@@ -146,13 +209,13 @@ protected:
     bool m_shouldClearLevel = true;
     LevelEditorLayer* m_editorLayer = nullptr;
     EventListener<web::WebTask> m_listener;
-    
+
     bool setup(LevelEditorLayer* editorLayer) {
         m_editorLayer = editorLayer;
-        
+
         auto winSize = this->m_size;
         this->setTitle("Editor AI");
-        
+
         auto descLabel = CCLabelBMFont::create(
             "Describe the level you want to generate:",
             "bigFont.fnt"
@@ -160,28 +223,28 @@ protected:
         descLabel->setScale(0.45f);
         descLabel->setPosition({winSize.width / 2, winSize.height / 2 + 70});
         m_mainLayer->addChild(descLabel);
-        
+
         auto inputBG = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
         inputBG->setContentSize({360, 100});
         inputBG->setColor({0, 0, 0});
         inputBG->setOpacity(100);
         inputBG->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_mainLayer->addChild(inputBG);
-        
+
         m_promptInput = TextInput::create(350, "e.g. Medium difficulty platforming", "bigFont.fnt");
         m_promptInput->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_promptInput->setScale(0.65f);
         m_promptInput->setMaxCharCount(200);
         m_mainLayer->addChild(m_promptInput);
-        
+
         auto clearLabel = CCLabelBMFont::create("Clear level before generating", "bigFont.fnt");
         clearLabel->setScale(0.4f);
-        
+
         auto onSpr = CCSprite::createWithSpriteFrameName("GJ_checkOn_001.png");
         auto offSpr = CCSprite::createWithSpriteFrameName("GJ_checkOff_001.png");
         onSpr->setScale(0.7f);
         offSpr->setScale(0.7f);
-        
+
         m_clearToggle = CCMenuItemToggler::create(
             offSpr,
             onSpr,
@@ -189,21 +252,22 @@ protected:
             menu_selector(AIGeneratorPopup::onToggleClear)
         );
         m_clearToggle->toggle(true);
-        
+
         auto toggleMenu = CCMenu::create();
-        toggleMenu->addChild(m_clearToggle);
+        toggleMenu->setPosition({winSize.width / 2, winSize.height / 2 - 35});
         m_clearToggle->setPosition({-80, 0});
         clearLabel->setPosition({20, 0});
+        toggleMenu->addChild(m_clearToggle);
         toggleMenu->addChild(clearLabel);
-        toggleMenu->setPosition({winSize.width / 2, winSize.height / 2 - 35});
         m_mainLayer->addChild(toggleMenu);
-        
+
         m_statusLabel = CCLabelBMFont::create("", "bigFont.fnt");
         m_statusLabel->setScale(0.4f);
         m_statusLabel->setPosition({winSize.width / 2, winSize.height / 2 - 60});
         m_statusLabel->setVisible(false);
         m_mainLayer->addChild(m_statusLabel);
-        
+
+        // Bottom button menu with proper layout
         auto generateSprite = ButtonSprite::create(
             "Generate",
             "goldFont.fnt",
@@ -215,7 +279,14 @@ protected:
             this,
             menu_selector(AIGeneratorPopup::onGenerate)
         );
-        
+
+        auto btnMenu = CCMenu::create();
+        btnMenu->setPosition({winSize.width / 2, winSize.height / 2 - 95});
+        m_generateBtn->setPosition({0, 0});
+        btnMenu->addChild(m_generateBtn);
+        m_mainLayer->addChild(btnMenu);
+
+        // Top-right corner menu for info and key buttons
         auto infoSprite = CCSprite::createWithSpriteFrameName("GJ_infoIcon_001.png");
         infoSprite->setScale(0.7f);
         auto infoBtn = CCMenuItemSpriteExtra::create(
@@ -223,7 +294,7 @@ protected:
             this,
             menu_selector(AIGeneratorPopup::onInfo)
         );
-        
+
         auto keySprite = CCSprite::createWithSpriteFrameName("GJ_lock_001.png");
         keySprite->setScale(0.7f);
         auto keyBtn = CCMenuItemSpriteExtra::create(
@@ -231,30 +302,29 @@ protected:
             this,
             menu_selector(AIGeneratorPopup::onKeyButton)
         );
-        
-        auto btnMenu = CCMenu::create();
-        m_generateBtn->setPosition({0, -85});
-        infoBtn->setPosition({165, 95});
-        keyBtn->setPosition({-165, 95});
-        btnMenu->addChild(m_generateBtn);
-        btnMenu->addChild(infoBtn);
-        btnMenu->addChild(keyBtn);
-        m_mainLayer->addChild(btnMenu);
-        
+
+        auto cornerMenu = CCMenu::create();
+        cornerMenu->setPosition({winSize.width - 25, winSize.height - 25});
+        infoBtn->setPosition({0, 0});
+        keyBtn->setPosition({-35, 0});
+        cornerMenu->addChild(infoBtn);
+        cornerMenu->addChild(keyBtn);
+        m_mainLayer->addChild(cornerMenu);
+
         return true;
     }
-    
+
     void onToggleClear(CCObject*) {
         m_shouldClearLevel = !m_shouldClearLevel;
     }
-    
+
     void onInfo(CCObject*) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model = Mod::get()->getSettingValue<std::string>("model");
-        
+
         FLAlertLayer::create(
             "Editor AI",
-            fmt::format(
+            gd::string(fmt::format(
                 "<cy>Direct API Integration</c>\n\n"
                 "<cg>Provider:</c> <co>{}</co>\n"
                 "<cg>Model:</c> <co>{}</co>\n\n"
@@ -266,144 +336,139 @@ protected:
                 provider,
                 model,
                 OBJECT_IDS.size()
-            ),
+            )),
             "OK"
         )->show();
     }
-    
+
     void onKeyButton(CCObject*) {
         std::string currentKey = Mod::get()->getSavedValue<std::string>("api-key", "");
-        
+
         if (!currentKey.empty()) {
-            // Show options menu - only 2 buttons (Cancel and Delete)
             geode::createQuickPopup(
                 "API Key",
-                "API key is saved. Delete it?",
+                fmt::format("API key saved: {}\n\nDelete it?", maskApiKey(currentKey)),
                 "Cancel", "Delete",
                 [this](FLAlertLayer*, bool btn2) {
                     if (btn2) {
-                        // Delete button
                         Mod::get()->setSavedValue<std::string>("api-key", std::string());
                         Notification::create("API Key Deleted", NotificationIcon::Success)->show();
                     }
                 }
             );
         } else {
-            // No key saved, show popup to enter
             showKeyPopup();
         }
     }
-    
+
     void showKeyPopup() {
         APIKeyPopup::create([](std::string key) {
             Mod::get()->setSavedValue("api-key", key);
             Notification::create("API Key Saved!", NotificationIcon::Success)->show();
-            log::info("API key saved (length: {})", key.length());
+            log::info("API key saved successfully");
         })->show();
     }
-    
+
     void showStatus(const std::string& msg, bool error = false) {
         m_statusLabel->setString(msg.c_str());
         m_statusLabel->setColor(error ? ccColor3B{255, 100, 100} : ccColor3B{100, 255, 100});
         m_statusLabel->setVisible(true);
     }
-    
+
     void clearLevel() {
         if (!m_editorLayer) return;
-        
+
         auto objects = m_editorLayer->m_objects;
         if (!objects) return;
-        
+
         auto toRemove = CCArray::create();
         CCObject* obj;
         CCARRAY_FOREACH(objects, obj) {
             toRemove->addObject(obj);
         }
-        
+
         CCARRAY_FOREACH(toRemove, obj) {
             auto gameObj = static_cast<GameObject*>(obj);
             if (gameObj) {
                 m_editorLayer->removeObject(gameObj, true);
             }
         }
-        
-        log::info("[Level Clear] Cleared {} objects from editor", toRemove->count());
+
+        log::info("Cleared {} objects from editor", toRemove->count());
     }
-    
+
     void createObjects(matjson::Value& objectsArray) {
         if (!m_editorLayer) {
             log::error("No editor layer!");
             return;
         }
-        
+
         if (!objectsArray.isArray()) {
             log::error("Objects value is not an array");
             return;
         }
-        
+
         int created = 0;
         int maxObjects = Mod::get()->getSettingValue<int64_t>("max-objects");
-        
+
         size_t objectCount = std::min(objectsArray.size(), static_cast<size_t>(maxObjects));
-        
+
         for (size_t i = 0; i < objectCount; i++) {
             try {
                 auto objData = objectsArray[i];
-                
+
                 auto idResult = objData["id"].asInt();
                 auto xResult = objData["x"].asDouble();
                 auto yResult = objData["y"].asDouble();
-                
+
                 if (!idResult || !xResult || !yResult) {
-                    log::warn("Missing required fields for object at index {}", i);
                     continue;
                 }
-                
+
                 int objectID = idResult.unwrap();
                 float x = static_cast<float>(xResult.unwrap());
                 float y = static_cast<float>(yResult.unwrap());
-                
+
                 auto gameObj = m_editorLayer->createObject(objectID, {x, y}, false);
-                
+
                 if (!gameObj) {
-                    log::warn("Failed to create object {}", objectID);
                     continue;
                 }
-                
+
                 auto rotResult = objData["rotation"].asDouble();
                 if (rotResult) {
                     gameObj->setRotation(static_cast<float>(rotResult.unwrap()));
                 }
-                
+
                 auto scaleResult = objData["scale"].asDouble();
                 if (scaleResult) {
                     gameObj->setScale(static_cast<float>(scaleResult.unwrap()));
                 }
-                
+
                 auto flipXResult = objData["flip_x"].asBool();
                 if (flipXResult && flipXResult.unwrap()) {
                     gameObj->setScaleX(-gameObj->getScaleX());
                 }
-                
+
                 auto flipYResult = objData["flip_y"].asBool();
                 if (flipYResult && flipYResult.unwrap()) {
                     gameObj->setScaleY(-gameObj->getScaleY());
                 }
-                
+
                 created++;
-                
+
             } catch (std::exception& e) {
                 log::warn("Failed to create object at index {}: {}", i, e.what());
             }
         }
-        
-        log::info("[Object Creation] Successfully created {} objects in editor", created);
-        
+
+        log::info("Successfully created {} objects", created);
+
         if (auto editorUI = m_editorLayer->m_editorUI) {
             editorUI->updateButtons();
         }
     }
-    
+
     std::string buildSystemPrompt() {
         std::string objectList;
         int count = 0;
@@ -416,7 +481,7 @@ protected:
                 break;
             }
         }
-        
+
         return fmt::format(
             "You are a Geometry Dash level designer AI.\n\n"
             "Return ONLY valid JSON - no markdown, no explanations.\n\n"
@@ -435,17 +500,16 @@ protected:
             objectList
         );
     }
-    
+
     void callAPI(const std::string& prompt, const std::string& apiKey) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model = Mod::get()->getSettingValue<std::string>("model");
         std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
         std::string style = Mod::get()->getSettingValue<std::string>("style");
         std::string length = Mod::get()->getSettingValue<std::string>("length");
-        
-        log::info("[API Call] Provider: {}, Model: {}", provider, model);
-        log::info("[API Call] Settings: {} / {} / {}", difficulty, style, length);
-        
+
+        log::info("Calling {} API with model: {}", provider, model);
+
         std::string systemPrompt = buildSystemPrompt();
         std::string fullPrompt = fmt::format(
             "Generate a Geometry Dash level:\n\n"
@@ -456,89 +520,72 @@ protected:
             "Return JSON with analysis and objects array.",
             prompt, difficulty, style, length
         );
-        
+
         matjson::Value requestBody;
         std::string url;
-        
+
         if (provider == "gemini") {
-            // Build contents array using std::vector
             std::vector<matjson::Value> contents;
             auto message = matjson::Value::object();
             message["role"] = "user";
-            
+
             std::vector<matjson::Value> parts;
             auto textPart = matjson::Value::object();
             textPart["text"] = systemPrompt + "\n\n" + fullPrompt;
             parts.push_back(textPart);
             message["parts"] = parts;
-            
+
             contents.push_back(message);
-            
+
             auto genConfig = matjson::Value::object();
             genConfig["temperature"] = 0.7;
             genConfig["maxOutputTokens"] = 65536;
-            
+
             requestBody = matjson::Value::object();
             requestBody["contents"] = contents;
             requestBody["generationConfig"] = genConfig;
-            
+
             url = fmt::format("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, apiKey);
-            
+
         } else if (provider == "claude") {
-            // Build messages array using std::vector
             std::vector<matjson::Value> messages;
             auto message = matjson::Value::object();
             message["role"] = "user";
             message["content"] = fullPrompt;
             messages.push_back(message);
-            
+
             requestBody = matjson::Value::object();
             requestBody["model"] = model;
             requestBody["max_tokens"] = 4096;
             requestBody["temperature"] = 0.7;
             requestBody["system"] = systemPrompt;
             requestBody["messages"] = messages;
-            
+
             url = "https://api.anthropic.com/v1/messages";
-            
+
         } else if (provider == "openai") {
-            // Build messages array using std::vector
             std::vector<matjson::Value> messages;
             auto sysMsg = matjson::Value::object();
             sysMsg["role"] = "system";
             sysMsg["content"] = systemPrompt;
             messages.push_back(sysMsg);
-            
+
             auto userMsg = matjson::Value::object();
             userMsg["role"] = "user";
             userMsg["content"] = fullPrompt;
             messages.push_back(userMsg);
-            
+
             requestBody = matjson::Value::object();
             requestBody["model"] = model;
             requestBody["messages"] = messages;
             requestBody["temperature"] = 0.7;
             requestBody["max_tokens"] = 4096;
-            
+
             url = "https://api.openai.com/v1/chat/completions";
         }
-        
+
         std::string jsonBody = requestBody.dump();
-        
-        auto req = web::WebRequest();
-        req.header("Content-Type", "application/json");
-        
-        if (provider == "gemini") {
-            // Key in URL for Gemini
-        } else if (provider == "claude") {
-            req.header("x-api-key", apiKey);
-            req.header("anthropic-version", "2023-06-01");
-        } else if (provider == "openai") {
-            req.header("Authorization", fmt::format("Bearer {}", apiKey));
-        }
-        
-        req.bodyString(jsonBody);
-        
+
         m_listener.bind([this, provider](web::WebTask::Event* e) {
             if (auto res = e->getValue()) {
                 this->onAPISuccess(res, provider);
@@ -546,112 +593,126 @@ protected:
                 this->onCancelled();
             }
         });
-        
-        log::info("[API Call] Sending request to {} API...", provider);
-        log::info("[API Call] Endpoint: {}", url.substr(0, 50));
-        m_listener.setFilter(req.post(url));
+
+        log::info("Sending request to {} (body: {} bytes)", provider, jsonBody.length());
+
+        auto request = web::WebRequest();
+        request.header("Content-Type", "application/json");
+
+        if (provider == "claude") {
+            request.header("x-api-key", apiKey);
+            request.header("anthropic-version", "2023-06-01");
+        } else if (provider == "openai") {
+            request.header("Authorization", fmt::format("Bearer {}", apiKey));
+        }
+
+        request.bodyString(jsonBody);
+        m_listener.setFilter(request.post(url));
     }
-    
+
     void onGenerate(CCObject*) {
         std::string prompt = m_promptInput->getString();
-        
+
         if (prompt.empty() || prompt == "e.g. Medium difficulty platforming") {
-            FLAlertLayer::create("Empty Prompt", "Please enter a description!", "OK")->show();
+            FLAlertLayer::create("Empty Prompt", gd::string("Please enter a description!"), "OK")->show();
             return;
         }
-        
+
         std::string apiKey = Mod::get()->getSavedValue<std::string>("api-key", "");
-        
+
         if (apiKey.empty()) {
             FLAlertLayer::create(
                 "API Key Required",
-                "Please enter your API key in mod settings!\n\n"
-                "Settings → Mods → Editor AI → Enter API Key",
+                gd::string("Please click the lock icon to enter your API key!"),
                 "OK"
             )->show();
             return;
         }
-        
+
         m_generateBtn->setEnabled(false);
-        
+
         m_loadingCircle = LoadingCircle::create();
         m_loadingCircle->setParentLayer(m_mainLayer);
         m_loadingCircle->setPosition(m_mainLayer->getContentSize() / 2);
         m_loadingCircle->show();
-        
+
         showStatus("AI is thinking...");
-        
+
         log::info("=== Generation Request ===");
         log::info("Prompt: {}", prompt);
-        
+
         callAPI(prompt, apiKey);
     }
-    
+
     void onAPISuccess(web::WebResponse* response, const std::string& provider) {
         if (m_loadingCircle) {
             m_loadingCircle->fadeAndRemove();
             m_loadingCircle = nullptr;
         }
         m_generateBtn->setEnabled(true);
-        
+
         if (!response->ok()) {
-            onError(fmt::format("API error: HTTP {}", response->code()));
+            std::string errorBody = response->string().unwrapOr("No error details available");
+            log::error("API request failed: HTTP {}", response->code());
+
+            auto [title, message] = parseAPIError(errorBody, response->code());
+
+            showStatus("Failed!", true);
+            FLAlertLayer::create(title.c_str(), gd::string(message), "OK")->show();
             return;
         }
-        
+
         try {
             auto jsonRes = response->json();
             if (!jsonRes) {
-                onError("Invalid JSON response");
+                onError("Invalid response format", "The API returned invalid data.");
                 return;
             }
-            
+
             auto json = jsonRes.unwrap();
             std::string aiResponse;
-            
-            log::info("[API Response] Received from {}, parsing...", provider);
-            
+
+            log::info("Received response from {}", provider);
+
             if (provider == "gemini") {
                 auto candidates = json["candidates"];
                 if (!candidates.isArray() || candidates.size() == 0) {
-                    onError("No response from Gemini");
+                    onError("No Response", "The AI didn't generate any content.");
                     return;
                 }
                 auto textResult = candidates[0]["content"]["parts"][0]["text"].asString();
                 if (!textResult) {
-                    onError("Failed to extract text");
+                    onError("Invalid Response", "Failed to extract AI response.");
                     return;
                 }
                 aiResponse = textResult.unwrap();
             } else if (provider == "claude") {
                 auto content = json["content"];
                 if (!content.isArray() || content.size() == 0) {
-                    onError("No response from Claude");
+                    onError("No Response", "The AI didn't generate any content.");
                     return;
                 }
                 auto textResult = content[0]["text"].asString();
                 if (!textResult) {
-                    onError("Failed to extract text");
+                    onError("Invalid Response", "Failed to extract AI response.");
                     return;
                 }
                 aiResponse = textResult.unwrap();
             } else if (provider == "openai") {
                 auto choices = json["choices"];
                 if (!choices.isArray() || choices.size() == 0) {
-                    onError("No response from OpenAI");
+                    onError("No Response", "The AI didn't generate any content.");
                     return;
                 }
                 auto textResult = choices[0]["message"]["content"].asString();
                 if (!textResult) {
-                    onError("Failed to extract text");
+                    onError("Invalid Response", "Failed to extract AI response.");
                     return;
                 }
                 aiResponse = textResult.unwrap();
             }
-            
-            log::info("[AI Response] Got {} characters", aiResponse.length());
-            
-            // Clean markdown
+
+            // Clean markdown code blocks
             size_t codeBlockStart = aiResponse.find("```");
             while (codeBlockStart != std::string::npos) {
                 size_t codeBlockEnd = aiResponse.find("```", codeBlockStart + 3);
@@ -662,43 +723,43 @@ protected:
                     break;
                 }
             }
-            
+
             // Extract JSON
             size_t jsonStart = aiResponse.find('{');
             size_t jsonEnd = aiResponse.rfind('}');
-            
+
             if (jsonStart == std::string::npos || jsonEnd == std::string::npos) {
-                onError("No JSON found in response");
+                onError("Invalid Response", "No valid level data found in response.");
                 return;
             }
-            
+
             aiResponse = aiResponse.substr(jsonStart, jsonEnd - jsonStart + 1);
-            
+
             auto levelJson = matjson::parse(aiResponse);
             if (!levelJson) {
-                onError("Failed to parse JSON");
+                onError("Parse Error", "Failed to parse level data.");
                 return;
             }
-            
+
             auto levelData = levelJson.unwrap();
-            
+
             if (!levelData.contains("objects")) {
-                onError("Missing objects array");
+                onError("Invalid Data", "Response doesn't contain level objects.");
                 return;
             }
-            
+
             auto objectsArray = levelData["objects"];
             if (!objectsArray.isArray() || objectsArray.size() == 0) {
-                onError("No objects generated");
+                onError("No Objects", "The AI didn't generate any objects.");
                 return;
             }
-            
-            showStatus("Processing objects...");
-            
+
+            showStatus("Creating objects...");
+
             if (m_shouldClearLevel) {
                 clearLevel();
             }
-            
+
             // Convert types to IDs
             for (size_t i = 0; i < objectsArray.size(); i++) {
                 auto obj = objectsArray[i];
@@ -712,48 +773,42 @@ protected:
                     }
                 }
             }
-            
-            log::info("[Level Generation] Creating {} objects...", objectsArray.size());
+
             createObjects(objectsArray);
-            log::info("[Level Generation] Successfully created objects!");
-            
+
             showStatus(fmt::format("✓ Created {} objects!", objectsArray.size()), false);
-            
+
             Notification::create(
                 fmt::format("Generated {} objects!", objectsArray.size()),
                 NotificationIcon::Success
             )->show();
-            
+
             auto closeAction = CCSequence::create(
                 CCDelayTime::create(2.0f),
                 CCCallFunc::create(this, callfunc_selector(AIGeneratorPopup::closePopup)),
                 nullptr
             );
             this->runAction(closeAction);
-            
+
         } catch (std::exception& e) {
-            onError(fmt::format("Error: {}", e.what()));
+            log::error("Exception during response processing: {}", e.what());
+            onError("Processing Error", "Failed to process AI response.");
         }
     }
-    
-    void onError(const std::string& error) {
+
+    void onError(const std::string& title, const std::string& message) {
         if (m_loadingCircle) {
             m_loadingCircle->fadeAndRemove();
             m_loadingCircle = nullptr;
         }
         m_generateBtn->setEnabled(true);
-        
+
         showStatus("Failed!", true);
-        log::error("[ERROR] Generation failed: {}", error);
-        log::error("[ERROR] Check your API key and internet connection");
-        
-        FLAlertLayer::create(
-            "Generation Failed",
-            fmt::format("<cr>Error:</c>\n\n{}", error),
-            "OK"
-        )->show();
+        log::error("Generation failed: {}", message);
+
+        FLAlertLayer::create(title.c_str(), gd::string(message), "OK")->show();
     }
-    
+
     void onCancelled() {
         if (m_loadingCircle) {
             m_loadingCircle->fadeAndRemove();
@@ -762,11 +817,11 @@ protected:
         m_generateBtn->setEnabled(true);
         showStatus("Cancelled", true);
     }
-    
+
     void closePopup() {
         this->onClose(nullptr);
     }
-    
+
 public:
     static AIGeneratorPopup* create(LevelEditorLayer* layer) {
         auto ret = new AIGeneratorPopup();
@@ -786,59 +841,56 @@ class $modify(AIEditorUI, EditorUI) {
         CCMenu* m_aiMenu;
         bool m_buttonAdded = false;
     };
-    
+
     bool init(LevelEditorLayer* layer) {
         if (!EditorUI::init(layer)) return false;
-        
+
         auto addButtonAction = CCSequence::create(
             CCDelayTime::create(0.1f),
             CCCallFunc::create(this, callfunc_selector(AIEditorUI::addAIButton)),
             nullptr
         );
         this->runAction(addButtonAction);
-        
+
         return true;
     }
-    
+
     void addAIButton() {
         if (m_fields->m_buttonAdded) return;
         m_fields->m_buttonAdded = true;
-        
-        log::info("Adding AI button to editor");
-        
+
         auto bg = ButtonSprite::create(
             "AI",
             "goldFont.fnt",
             "GJ_button_04.png",
             0.8f
         );
-        
+
         m_fields->m_aiButton = CCMenuItemSpriteExtra::create(
             bg,
             this,
             menu_selector(AIEditorUI::onAIButton)
         );
-        
+
         m_fields->m_aiMenu = CCMenu::create();
         m_fields->m_aiMenu->addChild(m_fields->m_aiButton);
-        m_fields->m_aiButton->setPosition({0, 0});
-        
+
+        // Position relative to editor UI elements
         auto winSize = CCDirector::get()->getWinSize();
-        m_fields->m_aiMenu->setPosition({60, winSize.height - 30});
+        m_fields->m_aiButton->setPosition({0, 0});
+        m_fields->m_aiMenu->setPosition({winSize.width - 45, winSize.height - 30});
         m_fields->m_aiMenu->setZOrder(100);
         m_fields->m_aiMenu->setID("ai-generator-menu"_spr);
-        
+
         this->addChild(m_fields->m_aiMenu);
-        
-        log::info("AI button added successfully");
+
+        log::info("AI button added to editor");
     }
-    
+
     void onAIButton(CCObject*) {
-        log::info("AI button clicked");
-        
         auto layer = this->m_editorLayer;
         if (!layer) {
-            FLAlertLayer::create("Error", "No editor layer found!", "OK")->show();
+            FLAlertLayer::create("Error", gd::string("No editor layer found!"), "OK")->show();
             return;
         }
         
@@ -876,12 +928,6 @@ $execute {
     log::info("========================================");
     log::info("       Editor AI v2.1.0 Loaded");
     log::info("========================================");
-    log::info("Direct API Integration");
-    log::info("Supported AI Providers:");
-    log::info("  • Google Gemini");
-    log::info("  • Anthropic Claude");
-    log::info("  • OpenAI ChatGPT");
-    log::info("----------------------------------------");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("========================================");
 }
