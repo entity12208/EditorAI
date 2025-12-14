@@ -8,54 +8,100 @@
 
 using namespace geode::prelude;
 
-// Load object IDs from JSON file
-static std::unordered_map<std::string, int> loadObjectIDs() {
-    std::unordered_map<std::string, int> ids;
+// Global object IDs storage
+static std::unordered_map<std::string, int> OBJECT_IDS;
+
+// Load object IDs from cached file or defaults
+static void loadObjectIDs() {
+    // Try loading from cache in save directory
+    auto cachePath = Mod::get()->getSaveDir() / "object_ids.json";
     
-    auto path = Mod::get()->getResourcesDir() / "object_ids.json";
-    
-    if (!std::filesystem::exists(path)) {
-        log::warn("object_ids.json not found, using defaults");
-        ids["block_black_gradient"] = 1;
-        ids["spike"] = 8;
-        ids["platform"] = 1731;
-        ids["orb_yellow"] = 36;
-        ids["pad_yellow"] = 35;
-        return ids;
-    }
-    
-    try {
-        std::ifstream file(path);
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        
-        auto json = matjson::parse(content);
-        if (!json) {
-            log::error("Failed to parse object_ids.json: {}", json.unwrapErr());
-            return ids;
-        }
-        
-        auto obj = json.unwrap();
-        if (!obj.isObject()) {
-            log::error("object_ids.json root is not an object");
-            return ids;
-        }
-        
-        for (auto& [key, value] : obj) {
-            auto intVal = value.asInt();
-            if (intVal) {
-                ids[key] = intVal.unwrap();
+    if (std::filesystem::exists(cachePath)) {
+        try {
+            std::ifstream file(cachePath);
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            
+            auto json = matjson::parse(content);
+            if (json) {
+                auto obj = json.unwrap();
+                if (obj.isObject()) {
+                    for (auto& [key, value] : obj) {
+                        auto intVal = value.asInt();
+                        if (intVal) {
+                            OBJECT_IDS[key] = intVal.unwrap();
+                        }
+                    }
+                    log::info("Loaded {} object IDs from cache", OBJECT_IDS.size());
+                    return;
+                }
             }
-        }
-        
-        log::info("Loaded {} object IDs", ids.size());
-    } catch (std::exception& e) {
-        log::error("Error loading object_ids.json: {}", e.what());
+        } catch (...) {}
     }
     
-    return ids;
+    // Use defaults if no cache
+    log::info("Using default object IDs, will download full list...");
+    OBJECT_IDS["block_black_gradient"] = 1;
+    OBJECT_IDS["spike"] = 8;
+    OBJECT_IDS["platform"] = 1731;
+    OBJECT_IDS["orb_yellow"] = 36;
+    OBJECT_IDS["pad_yellow"] = 35;
 }
 
-static std::unordered_map<std::string, int> OBJECT_IDS = loadObjectIDs();
+// Download object IDs from GitHub
+static void downloadObjectIDs() {
+    static EventListener<web::WebTask> listener;
+    
+    listener.bind([](web::WebTask::Event* e) {
+        if (auto res = e->getValue()) {
+            if (!res->ok()) {
+                log::warn("Failed to download object_ids.json: HTTP {}", res->code());
+                return;
+            }
+            
+            try {
+                auto response = res->string();
+                if (!response) {
+                    log::warn("Failed to get response string");
+                    return;
+                }
+                
+                auto json = matjson::parse(response.unwrap());
+                if (!json) {
+                    log::error("Failed to parse downloaded JSON");
+                    return;
+                }
+                
+                auto obj = json.unwrap();
+                if (!obj.isObject()) {
+                    log::error("Downloaded JSON is not an object");
+                    return;
+                }
+                
+                // Update global map
+                OBJECT_IDS.clear();
+                for (auto& [key, value] : obj) {
+                    auto intVal = value.asInt();
+                    if (intVal) {
+                        OBJECT_IDS[key] = intVal.unwrap();
+                    }
+                }
+                
+                // Save to cache
+                auto cachePath = Mod::get()->getSaveDir() / "object_ids.json";
+                std::ofstream file(cachePath);
+                file << response.unwrap();
+                file.close();
+                
+                log::info("Downloaded and cached {} object IDs", OBJECT_IDS.size());
+            } catch (std::exception& e) {
+                log::error("Failed to process downloaded object_ids.json: {}", e.what());
+            }
+        }
+    });
+    
+    auto req = web::WebRequest();
+    listener.setFilter(req.get("https://raw.githubusercontent.com/entity12208/EditorAI/refs/heads/main/resources/object_ids.json"));
+}
 
 // Helper to mask API keys in logs
 static std::string maskApiKey(const std::string& key) {
@@ -928,6 +974,13 @@ $execute {
     log::info("========================================");
     log::info("       Editor AI v2.1.0 Loaded");
     log::info("========================================");
+    
+    // Load object IDs from cache or defaults
+    loadObjectIDs();
     log::info("Loaded {} object types", OBJECT_IDS.size());
+    
+    // Download latest object IDs from GitHub
+    downloadObjectIDs();
+    
     log::info("========================================");
 }

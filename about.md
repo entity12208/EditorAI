@@ -36,6 +36,9 @@ Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT wit
 - gpt-5-mini (balanced)
 - gpt-5-nano (cheap)
 
+**Note** 
+For longer and more complicated levels, it is **Highly** recommended you use the best model possible.
+
 ## Settings
 
 - **AI Provider** - gemini/claude/openai
