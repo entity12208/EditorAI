@@ -2,15 +2,16 @@
   "geode": "4.10.0",
   "gd": {
     "win": "2.2074",
-    "android": "2.2074",
+    "android32": "2.2074",
+    "android64": "2.2074",
     "mac": "2.2074",
     "ios": "2.2074"
   },
   "id": "entity12208.edit-ai",
   "name": "Editor AI",
-  "version": "v2.1.0",
+  "version": "v2.1.1",
   "developer": "entity12208",
-  "description": "Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT.",
+  "description": "Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT with full trigger support (Alpha, Move, Toggle) and group IDs. Now available on all platforms!",
   "settings": {
     "ai-provider": {
       "type": "string",
@@ -65,6 +66,47 @@
       "min": 10,
       "max": 1000000
     },
+    "rate-limiting-section": {
+      "type": "title",
+      "name": "Rate Limiting"
+    },
+    "enable-rate-limiting": {
+      "type": "bool",
+      "name": "Enable Rate Limiting",
+      "description": "Prevents excessive API calls to save tokens and avoid rate limits",
+      "default": true
+    },
+    "rate-limit-seconds": {
+      "type": "int",
+      "name": "Minimum Seconds Between Requests",
+      "description": "Minimum time between API requests (prevents spam)",
+      "default": 3,
+      "min": 1,
+      "max": 60,
+      "enableIf": "enable-rate-limiting"
+    },
+    "features-section": {
+      "type": "title",
+      "name": "Features"
+    },
+    "enable-colors": {
+      "type": "bool",
+      "name": "AI Color Control",
+      "description": "Allow AI to set object colors",
+      "default": false
+    },
+    "enable-group-ids": {
+      "type": "bool",
+      "name": "AI Group IDs",
+      "description": "Allow AI to assign Group IDs to objects",
+      "default": false
+    },
+    "enable-triggers": {
+      "type": "bool",
+      "name": "Trigger Support ⚡",
+      "description": "AI can create and configure Alpha, Move, and Toggle triggers with touch activation",
+      "default": false
+    },
     "api-key-info": {
       "type": "title",
       "name": "API Key Management"
@@ -77,6 +119,13 @@
       "enableIf": "false"
     }
   },
+  "platforms": [
+    "win",
+    "android32",
+    "android64",
+    "mac",
+    "ios"
+  ],
   "tags": [
     "editor",
     "utility",

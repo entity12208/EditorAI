@@ -78,7 +78,7 @@ For longer and more complicated levels, it is **Highly** recommended you use the
 ---
 
 **Developer:** Entity12208  
-**Version:** 2.1.0  
+**Version:** 2.1.1  
 **Framework:** Geode SDK
 
 ##### Disclaimer:

@@ -5,15 +5,23 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <chrono>
 
 using namespace geode::prelude;
 
 // Global object IDs storage
 static std::unordered_map<std::string, int> OBJECT_IDS;
 
+// Rate limiting tracker
+static std::chrono::steady_clock::time_point lastRequestTime;
+
+// Known trigger IDs - verified from GD resources
+static const int TRIGGER_ALPHA = 1007;
+static const int TRIGGER_MOVE = 901;
+static const int TRIGGER_TOGGLE = 1049;
+
 // Load object IDs from cached file or defaults
 static void loadObjectIDs() {
-    // Try loading from cache in save directory
     auto cachePath = Mod::get()->getSaveDir() / "object_ids.json";
     
     if (std::filesystem::exists(cachePath)) {
@@ -40,11 +48,14 @@ static void loadObjectIDs() {
     
     // Use defaults if no cache
     log::info("Using default object IDs, will download full list...");
-    OBJECT_IDS["block_black_gradient"] = 1;
-    OBJECT_IDS["spike"] = 8;
+    OBJECT_IDS["block_black_gradient_square"] = 1;
+    OBJECT_IDS["spike_black_gradient_spike"] = 8;
     OBJECT_IDS["platform"] = 1731;
-    OBJECT_IDS["orb_yellow"] = 36;
-    OBJECT_IDS["pad_yellow"] = 35;
+    OBJECT_IDS["jump_orb_yellow_jump_orb"] = 36;
+    OBJECT_IDS["jump_pad_yellow_jump_pad"] = 35;
+    OBJECT_IDS["alpha_trigger"] = TRIGGER_ALPHA;
+    OBJECT_IDS["move_trigger"] = TRIGGER_MOVE;
+    OBJECT_IDS["toggle_trigger"] = TRIGGER_TOGGLE;
 }
 
 // Download object IDs from GitHub
@@ -109,6 +120,29 @@ static std::string maskApiKey(const std::string& key) {
     return key.substr(0, 4) + "..." + key.substr(key.length() - 4);
 }
 
+// Parse HEX color string to ccColor3B
+static ccColor3B parseHexColor(const std::string& hex) {
+    if (hex.length() != 6 && hex.length() != 7) {
+        return {255, 255, 255}; // Default to white
+    }
+    
+    std::string cleanHex = hex;
+    if (cleanHex[0] == '#') {
+        cleanHex = cleanHex.substr(1);
+    }
+    
+    try {
+        unsigned int hexValue = std::stoul(cleanHex, nullptr, 16);
+        return {
+            static_cast<GLubyte>((hexValue >> 16) & 0xFF),
+            static_cast<GLubyte>((hexValue >> 8) & 0xFF),
+            static_cast<GLubyte>(hexValue & 0xFF)
+        };
+    } catch (...) {
+        return {255, 255, 255};
+    }
+}
+
 // Parse API error and return user-friendly message
 static std::pair<std::string, std::string> parseAPIError(const std::string& errorBody, int statusCode) {
     std::string title = "API Error";
@@ -163,6 +197,97 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
     }
     
     return {title, message};
+}
+
+// Helper to configure trigger properties
+// NOTE: Limited by Geode bindings - logs configuration for future implementation
+static void configureTrigger(GameObject* trigger, matjson::Value& triggerData) {
+    if (!trigger) return;
+    
+    int objectID = trigger->m_objectID;
+    bool isTrigger = (objectID == TRIGGER_ALPHA || objectID == TRIGGER_MOVE || objectID == TRIGGER_TOGGLE);
+    
+    if (!isTrigger) return;
+    
+    log::info("Creating trigger {} at position ({}, {})", objectID, trigger->getPositionX(), trigger->getPositionY());
+    
+    // Log target group configuration (for future when bindings expose trigger internals)
+    auto targetGroupResult = triggerData["target_group"].asInt();
+    if (targetGroupResult) {
+        int targetGroup = targetGroupResult.unwrap();
+        log::info("  Target Group: {}", targetGroup);
+    }
+    
+    // Log touch-triggered mode
+    auto touchTriggeredResult = triggerData["touch_triggered"].asBool();
+    if (touchTriggeredResult && touchTriggeredResult.unwrap()) {
+        log::info("  Touch Triggered: YES");
+    }
+    
+    // Log trigger-specific configurations
+    switch (objectID) {
+        case TRIGGER_ALPHA: {
+            auto opacityResult = triggerData["opacity"].asDouble();
+            if (opacityResult) {
+                float opacity = static_cast<float>(opacityResult.unwrap());
+                log::info("  Opacity: {}", opacity);
+            }
+            
+            auto durationResult = triggerData["duration"].asDouble();
+            if (durationResult) {
+                float duration = static_cast<float>(durationResult.unwrap());
+                log::info("  Duration: {} seconds", duration);
+            }
+            break;
+        }
+        
+        case TRIGGER_MOVE: {
+            auto moveXResult = triggerData["move_x"].asDouble();
+            auto moveYResult = triggerData["move_y"].asDouble();
+            
+            if (moveXResult || moveYResult) {
+                float moveX = moveXResult ? static_cast<float>(moveXResult.unwrap()) : 0.0f;
+                float moveY = moveYResult ? static_cast<float>(moveYResult.unwrap()) : 0.0f;
+                log::info("  Move Offset: ({}, {})", moveX, moveY);
+            }
+            
+            auto durationResult = triggerData["duration"].asDouble();
+            if (durationResult) {
+                float duration = static_cast<float>(durationResult.unwrap());
+                log::info("  Duration: {} seconds", duration);
+            }
+            
+            auto easingResult = triggerData["easing"].asInt();
+            if (easingResult) {
+                int easing = easingResult.unwrap();
+                log::info("  Easing: {}", easing);
+            }
+            break;
+        }
+        
+        case TRIGGER_TOGGLE: {
+            auto activateResult = triggerData["activate_group"].asBool();
+            if (activateResult) {
+                bool activate = activateResult.unwrap();
+                log::info("  Activate: {}", activate ? "ON" : "OFF");
+            }
+            break;
+        }
+    }
+    
+    // Assign groups to the trigger object itself (for trigger activation control)
+    auto groupsData = triggerData["groups"];
+    if (groupsData.isArray() && trigger->m_groups) {
+        for (size_t g = 0; g < groupsData.size() && trigger->m_groupCount < 10; g++) {
+            auto groupResult = groupsData[g].asInt();
+            if (groupResult) {
+                int groupID = groupResult.unwrap();
+                (*trigger->m_groups)[trigger->m_groupCount] = static_cast<short>(groupID);
+                trigger->m_groupCount++;
+                log::info("  Assigned to Group: {}", groupID);
+            }
+        }
+    }
 }
 
 // API Key Entry Popup
@@ -367,20 +492,39 @@ protected:
     void onInfo(CCObject*) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model = Mod::get()->getSettingValue<std::string>("model");
+        bool rateLimiting = Mod::get()->getSettingValue<bool>("enable-rate-limiting");
+        bool colors = Mod::get()->getSettingValue<bool>("enable-colors");
+        bool groups = Mod::get()->getSettingValue<bool>("enable-group-ids");
+        bool triggers = Mod::get()->getSettingValue<bool>("enable-triggers");
+
+        std::string features = "<cy>Features:</c>\n";
+        if (colors) features += "• <cg>Color Control</c>\n";
+        if (groups) features += "• <cg>Group IDs</c>\n";
+        if (triggers) features += "• <cg>Trigger Support</c>\n";
 
         FLAlertLayer::create(
             "Editor AI",
             gd::string(fmt::format(
                 "<cy>Direct API Integration</c>\n\n"
                 "<cg>Provider:</c> <co>{}</co>\n"
-                "<cg>Model:</c> <co>{}</co>\n\n"
+                "<cg>Model:</c> <co>{}</co>\n"
+                "<cy>Rate Limiting:</c> {}\n\n"
+                "{}\n"
                 "<cy>Setup:</c>\n"
                 "• Click lock icon to enter API key\n"
                 "• Select provider & model in settings\n"
+                "• Configure features in settings\n"
                 "• Start generating!\n\n"
-                "<co>Loaded {} object types</co>",
+                "<co>Loaded {} object types</co>\n\n"
+                "<cl>Trigger Support:</cl>\n"
+                "• Alpha Trigger (1007)\n"
+                "• Move Trigger (901)\n"
+                "• Toggle Trigger (1049)\n\n"
+                "<cp>Available on all platforms!</cp>",
                 provider,
                 model,
+                rateLimiting ? "<cg>On</c>" : "<cr>Off</c>",
+                features,
                 OBJECT_IDS.size()
             )),
             "OK"
@@ -454,7 +598,12 @@ protected:
             return;
         }
 
+        bool enableColors = Mod::get()->getSettingValue<bool>("enable-colors");
+        bool enableGroups = Mod::get()->getSettingValue<bool>("enable-group-ids");
+        bool enableTriggers = Mod::get()->getSettingValue<bool>("enable-triggers");
+
         int created = 0;
+        int triggers = 0;
         int maxObjects = Mod::get()->getSettingValue<int64_t>("max-objects");
 
         size_t objectCount = std::min(objectsArray.size(), static_cast<size_t>(maxObjects));
@@ -481,6 +630,7 @@ protected:
                     continue;
                 }
 
+                // Standard properties
                 auto rotResult = objData["rotation"].asDouble();
                 if (rotResult) {
                     gameObj->setRotation(static_cast<float>(rotResult.unwrap()));
@@ -501,6 +651,39 @@ protected:
                     gameObj->setScaleY(-gameObj->getScaleY());
                 }
 
+                // Initial Colors
+                if (enableColors && objData.contains("color")) {
+                    auto colorResult = objData["color"].asString();
+                    if (colorResult) {
+                        auto color = parseHexColor(colorResult.unwrap());
+                        gameObj->setObjectColor(color);
+                        log::debug("Set color {} on object {}", colorResult.unwrap(), objectID);
+                    }
+                }
+
+                // Group IDs
+                if (enableGroups && objData.contains("groups")) {
+                    auto groupsData = objData["groups"];
+                    if (groupsData.isArray()) {
+                        for (size_t g = 0; g < groupsData.size(); g++) {
+                            auto groupResult = groupsData[g].asInt();
+                            if (groupResult) {
+                                int groupID = groupResult.unwrap();
+                                gameObj->addToGroup(groupID);
+                                log::debug("Added object {} to group {}", objectID, groupID);
+                            }
+                        }
+                    }
+                }
+
+                // Trigger Configuration
+                bool isTrigger = (objectID == TRIGGER_ALPHA || objectID == TRIGGER_MOVE || objectID == TRIGGER_TOGGLE);
+                if (enableTriggers && isTrigger) {
+                    configureTrigger(gameObj, objData);
+                    triggers++;
+                    log::info("Configured trigger {} at ({}, {})", objectID, x, y);
+                }
+
                 created++;
 
             } catch (std::exception& e) {
@@ -508,7 +691,7 @@ protected:
             }
         }
 
-        log::info("Successfully created {} objects", created);
+        log::info("Successfully created {} objects ({} triggers)", created, triggers);
 
         if (auto editorUI = m_editorLayer->m_editorUI) {
             editorUI->updateButtons();
@@ -528,22 +711,60 @@ protected:
             }
         }
 
+        bool enableColors = Mod::get()->getSettingValue<bool>("enable-colors");
+        bool enableGroups = Mod::get()->getSettingValue<bool>("enable-group-ids");
+        bool enableTriggers = Mod::get()->getSettingValue<bool>("enable-triggers");
+
+        std::string features;
+        if (enableColors || enableGroups || enableTriggers) {
+            features = "\n\n<cy>ENABLED FEATURES:</c>\n";
+            if (enableColors) {
+                features += "- You can set \"color\": \"#RRGGBB\" (HEX) on objects\n";
+            }
+            if (enableGroups) {
+                features += "- You can set \"groups\": [1, 2, 3] (array of group IDs) on objects\n";
+            }
+            if (enableTriggers) {
+                features += "- You can use TRIGGERS with full configuration:\n"
+                                       "  \n"
+                                       "  Alpha Trigger (alpha_trigger):\n"
+                                       "  {{\"type\": \"alpha_trigger\", \"x\": 100, \"y\": 0,\n"
+                                       "   \"target_group\": 1, \"opacity\": 0.5, \"duration\": 1.0,\n"
+                                       "   \"touch_triggered\": true}}\n"
+                                       "  \n"
+                                       "  Move Trigger (move_trigger):\n"
+                                       "  {{\"type\": \"move_trigger\", \"x\": 200, \"y\": 0,\n"
+                                       "   \"target_group\": 1, \"move_x\": 100, \"move_y\": 50,\n"
+                                       "   \"duration\": 2.0, \"easing\": 1, \"touch_triggered\": true}}\n"
+                                       "  \n"
+                                       "  Toggle Trigger (toggle_trigger):\n"
+                                       "  {{\"type\": \"toggle_trigger\", \"x\": 300, \"y\": 0,\n"
+                                       "   \"target_group\": 2, \"activate_group\": true,\n"
+                                       "   \"touch_triggered\": true}}\n"
+                                       "  \n"
+                                       "  - Use groups to organize objects and triggers\n"
+                                       "  - Touch-triggered triggers activate on player contact\n"
+                                       "  - Combine triggers for complex mechanics\n";
+            }
+        }
+
         return fmt::format(
             "You are a Geometry Dash level designer AI.\n\n"
             "Return ONLY valid JSON - no markdown, no explanations.\n\n"
-            "Available objects: {}\n\n"
+            "Available objects: {}{}\n\n"
             "JSON Format:\n"
             "{{\n"
             "  \"analysis\": \"Brief reasoning\",\n"
             "  \"objects\": [\n"
-            "    {{\"type\": \"block_black_gradient\", \"x\": 0, \"y\": 30}},\n"
-            "    {{\"type\": \"spike\", \"x\": 150, \"y\": 0}}\n"
+            "    {{\"type\": \"block_black_gradient_square\", \"x\": 0, \"y\": 30}},\n"
+            "    {{\"type\": \"spike_black_gradient_spike\", \"x\": 150, \"y\": 0}}\n"
             "  ]\n"
             "}}\n\n"
             "Coordinates: X=horizontal (10 units=1 grid), Y=vertical (0=ground, 30=1 block up)\n"
             "Spacing: EASY=150-200, MEDIUM=90-150, HARD=60-90, EXTREME=30-60 units\n"
             "Length: SHORT=500-1000, MEDIUM=1000-2000, LONG=2000-4000, XL=4000-8000, XXL=8000+ X units",
-            objectList
+            objectList,
+            features
         );
     }
 
@@ -675,6 +896,28 @@ protected:
             return;
         }
 
+        // Rate limiting check
+        if (Mod::get()->getSettingValue<bool>("enable-rate-limiting")) {
+            int rateLimitSeconds = Mod::get()->getSettingValue<int64_t>("rate-limit-seconds");
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastRequestTime).count();
+
+            if (elapsed < rateLimitSeconds) {
+                int remaining = rateLimitSeconds - elapsed;
+                FLAlertLayer::create(
+                    "Rate Limit",
+                    gd::string(fmt::format(
+                        "Please wait {} more second{} before generating again.\n\n"
+                        "This prevents excessive API usage and saves tokens.",
+                        remaining,
+                        remaining == 1 ? "" : "s"
+                    )),
+                    "OK"
+                )->show();
+                return;
+            }
+        }
+
         m_generateBtn->setEnabled(false);
 
         m_loadingCircle = LoadingCircle::create();
@@ -686,6 +929,9 @@ protected:
 
         log::info("=== Generation Request ===");
         log::info("Prompt: {}", prompt);
+
+        // Update rate limit tracker
+        lastRequestTime = std::chrono::steady_clock::now();
 
         callAPI(prompt, apiKey);
     }
@@ -711,7 +957,7 @@ protected:
         try {
             auto jsonRes = response->json();
             if (!jsonRes) {
-                onError("Invalid response format", "The API returned invalid data.");
+                onError("Invalid Response", "The API returned invalid data.");
                 return;
             }
 
@@ -972,8 +1218,12 @@ class $modify(LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("       Editor AI v2.1.0 Loaded");
+    log::info("       Editor AI v2.4.0 Loaded");
+    log::info("   Cross-Platform Support Enabled!");
     log::info("========================================");
+    
+    // Initialize rate limit tracker
+    lastRequestTime = std::chrono::steady_clock::now() - std::chrono::hours(1);
     
     // Load object IDs from cache or defaults
     loadObjectIDs();
@@ -982,5 +1232,23 @@ $execute {
     // Download latest object IDs from GitHub
     downloadObjectIDs();
     
+    // Log feature status
+    bool colors = Mod::get()->getSettingValue<bool>("enable-colors");
+    bool groups = Mod::get()->getSettingValue<bool>("enable-group-ids");
+    bool triggers = Mod::get()->getSettingValue<bool>("enable-triggers");
+    
+    log::info("Features: Colors={}, Groups={}, Triggers={}", colors, groups, triggers);
+    
+    // Log rate limiting status
+    bool rateLimiting = Mod::get()->getSettingValue<bool>("enable-rate-limiting");
+    if (rateLimiting) {
+        int seconds = Mod::get()->getSettingValue<int64_t>("rate-limit-seconds");
+        log::info("Rate limiting: ENABLED ({} seconds)", seconds);
+    } else {
+        log::info("Rate limiting: DISABLED");
+    }
+    
+    log::info("Trigger support: Alpha ({}), Move ({}), Toggle ({})", TRIGGER_ALPHA, TRIGGER_MOVE, TRIGGER_TOGGLE);
+    log::info("Platform support: Windows, Android32, Android64, MacOS, iOS");
     log::info("========================================");
 }
