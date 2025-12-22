@@ -318,6 +318,7 @@ protected:
         m_mainLayer->addChild(inputBG);
         
         m_keyInput = TextInput::create(350, "sk-...", "bigFont.fnt");
+        m_keyInput->setAllowedChars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_!@#$%^&*()+=[]{}|;:',.<>?/~`");
         m_keyInput->setPosition({winSize.width / 2, winSize.height / 2});
         m_keyInput->setScale(0.6f);
         m_keyInput->setMaxCharCount(500);
