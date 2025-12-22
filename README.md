@@ -9,22 +9,6 @@ AI-powered level generation for Geometry Dash 2.2074. Generate complete levels d
 3. **Enter Key** - Click lock icon in AI popup
 4. **Generate** - Describe your level and go!
 
-## ⭐ New in v2.2.0
-
-### 🛡️ Rate Limiting (Default: ON)
-- Prevents excessive API calls
-- Saves your tokens/money
-- Configurable cooldown (default: 3 seconds)
-- Can be disabled in settings
-
-### 🧪 Experimental Features
-Enable in settings for beta features:
-
-- **AI Color Control** - Objects can have custom HEX colors
-- **Group ID Assignment** - AI can assign objects to groups
-- **Toggle Triggers** - Create toggle triggers (including touch-activated)
-- **Level Settings** - AI can set ground/background types
-
 ## API Keys
 
 While choosing an API to use, note that cheaper models will not handle the mod as well and will fail far more often.
