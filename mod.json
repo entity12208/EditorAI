@@ -8,7 +8,7 @@
   },
   "id": "entity12208.edit-ai",
   "name": "Editor AI",
-  "version": "v2.1.1",
+  "version": "v2.1.2",
   "developer": "entity12208",
   "description": "Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT with full trigger support (Alpha, Move, Toggle) and group IDs. Now available on all platforms!",
   "settings": {
@@ -17,7 +17,7 @@
       "name": "AI Provider",
       "description": "Which AI service to use",
       "default": "gemini",
-      "one-of": ["gemini", "claude", "openai"]
+      "one-of": ["gemini", "claude", "openai", "ollama"]
     },
     "model": {
       "type": "string",
@@ -105,6 +105,32 @@
       "name": "Trigger Support ⚡",
       "description": "AI can create and configure Alpha, Move, and Toggle triggers with touch activation",
       "default": false
+    },
+    "advanced-level-editing-section": {
+      "type": "title",
+      "name": "⚠️ Advanced Level Editing (Experimental)"
+    },
+    "enable-advanced-level-editing": {
+      "type": "bool",
+      "name": "Advanced Level Settings",
+      "description": "Allow AI to modify level settings like background/ground colors, start speed/mode, dual mode, etc. WARNING: This is experimental!",
+      "default": false
+    },
+    "ollama-section": {
+      "type": "title",
+      "name": "Ollama (Local AI)"
+    },
+    "ollama-url": {
+      "type": "string",
+      "name": "Ollama Server URL",
+      "description": "URL of your local Ollama server",
+      "default": "http://localhost:11434"
+    },
+    "ollama-model": {
+      "type": "string",
+      "name": "Ollama Model",
+      "description": "Model name (auto-detected when Ollama is running)",
+      "default": "deepseek-v3.1:671b-cloud"
     },
     "api-key-info": {
       "type": "title",

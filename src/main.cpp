@@ -5,142 +5,116 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/ui/TextInput.hpp>
-#include <chrono>
 
 using namespace geode::prelude;
 
-// Global object IDs storage
-static std::unordered_map<std::string, int> OBJECT_IDS;
-
-// Rate limiting tracker
-static std::chrono::steady_clock::time_point lastRequestTime;
-
-// Known trigger IDs - verified from GD resources
-static const int TRIGGER_ALPHA = 1007;
-static const int TRIGGER_MOVE = 901;
-static const int TRIGGER_TOGGLE = 1049;
-
-// Load object IDs from cached file or defaults
-static void loadObjectIDs() {
-    auto cachePath = Mod::get()->getSaveDir() / "object_ids.json";
+// Parse object IDs from JSON string
+static std::unordered_map<std::string, int> parseObjectIDs(const std::string& jsonContent, const std::string& source) {
+    std::unordered_map<std::string, int> ids;
     
-    if (std::filesystem::exists(cachePath)) {
-        try {
-            std::ifstream file(cachePath);
-            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            
-            auto json = matjson::parse(content);
-            if (json) {
-                auto obj = json.unwrap();
-                if (obj.isObject()) {
-                    for (auto& [key, value] : obj) {
-                        auto intVal = value.asInt();
-                        if (intVal) {
-                            OBJECT_IDS[key] = intVal.unwrap();
-                        }
-                    }
-                    log::info("Loaded {} object IDs from cache", OBJECT_IDS.size());
-                    return;
-                }
+    try {
+        auto json = matjson::parse(jsonContent);
+        if (!json) {
+            log::error("Failed to parse {} object_ids.json: {}", source, json.unwrapErr());
+            return ids;
+        }
+        
+        auto obj = json.unwrap();
+        if (!obj.isObject()) {
+            log::error("{} object_ids.json root is not an object", source);
+            return ids;
+        }
+        
+        for (auto& [key, value] : obj) {
+            auto intVal = value.asInt();
+            if (intVal) {
+                ids[key] = intVal.unwrap();
             }
-        } catch (...) {}
+        }
+        
+        log::info("Loaded {} object IDs from {}", ids.size(), source);
+    } catch (std::exception& e) {
+        log::error("Error parsing {} object_ids.json: {}", source, e.what());
     }
     
-    // Use defaults if no cache
-    log::info("Using default object IDs, will download full list...");
-    OBJECT_IDS["block_black_gradient_square"] = 1;
-    OBJECT_IDS["spike_black_gradient_spike"] = 8;
-    OBJECT_IDS["platform"] = 1731;
-    OBJECT_IDS["jump_orb_yellow_jump_orb"] = 36;
-    OBJECT_IDS["jump_pad_yellow_jump_pad"] = 35;
-    OBJECT_IDS["alpha_trigger"] = TRIGGER_ALPHA;
-    OBJECT_IDS["move_trigger"] = TRIGGER_MOVE;
-    OBJECT_IDS["toggle_trigger"] = TRIGGER_TOGGLE;
+    return ids;
 }
 
-// Download object IDs from GitHub
-static void downloadObjectIDs() {
-    static EventListener<web::WebTask> listener;
+// Load object IDs with priority: Local file > Defaults
+// GitHub updates happen asynchronously after startup
+static std::unordered_map<std::string, int> loadObjectIDs() {
+    std::unordered_map<std::string, int> ids;
     
+    // Try local file first (synchronous, fast)
+    auto path = Mod::get()->getResourcesDir() / "object_ids.json";
+    
+    if (std::filesystem::exists(path)) {
+        try {
+            log::info("Loading object_ids.json from local file...");
+            std::ifstream file(path);
+            std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            ids = parseObjectIDs(content, "local file");
+            if (ids.size() > 0) {
+                return ids;
+            }
+        } catch (std::exception& e) {
+            log::error("Error reading local object_ids.json: {}", e.what());
+        }
+    } else {
+        log::warn("Local object_ids.json not found");
+    }
+    
+    // Fallback to defaults
+    log::warn("Using default object IDs (5 objects only)");
+    ids["block_black_gradient"] = 1;
+    ids["spike"] = 8;
+    ids["platform"] = 1731;
+    ids["orb_yellow"] = 36;
+    ids["pad_yellow"] = 35;
+    
+    return ids;
+}
+
+static std::unordered_map<std::string, int> OBJECT_IDS = loadObjectIDs();
+
+// Async GitHub update function (called after startup)
+static void updateObjectIDsFromGitHub() {
+    log::info("Scheduling GitHub object_ids.json update...");
+    
+    auto request = web::WebRequest();
+    auto task = request.get("https://raw.githubusercontent.com/entity12208/EditorAI/refs/heads/main/resources/object_ids.json");
+    
+    // This listener will be static and persist
+    static EventListener<web::WebTask> listener;
     listener.bind([](web::WebTask::Event* e) {
         if (auto res = e->getValue()) {
-            if (!res->ok()) {
-                log::warn("Failed to download object_ids.json: HTTP {}", res->code());
-                return;
-            }
-            
-            try {
-                auto response = res->string();
-                if (!response) {
-                    log::warn("Failed to get response string");
-                    return;
-                }
-                
-                auto json = matjson::parse(response.unwrap());
-                if (!json) {
-                    log::error("Failed to parse downloaded JSON");
-                    return;
-                }
-                
-                auto obj = json.unwrap();
-                if (!obj.isObject()) {
-                    log::error("Downloaded JSON is not an object");
-                    return;
-                }
-                
-                // Update global map
-                OBJECT_IDS.clear();
-                for (auto& [key, value] : obj) {
-                    auto intVal = value.asInt();
-                    if (intVal) {
-                        OBJECT_IDS[key] = intVal.unwrap();
+            if (res->ok()) {
+                auto content = res->string();
+                if (content) {
+                    auto newIds = parseObjectIDs(content.unwrap(), "GitHub");
+                    if (newIds.size() > OBJECT_IDS.size()) {
+                        OBJECT_IDS = newIds;
+                        log::info("Successfully updated to {} object IDs from GitHub!", OBJECT_IDS.size());
+                        Notification::create(
+                            fmt::format("Object library updated! ({} objects)", OBJECT_IDS.size()),
+                            NotificationIcon::Success
+                        )->show();
+                    } else {
+                        log::info("GitHub version has same or fewer objects, keeping current");
                     }
                 }
-                
-                // Save to cache
-                auto cachePath = Mod::get()->getSaveDir() / "object_ids.json";
-                std::ofstream file(cachePath);
-                file << response.unwrap();
-                file.close();
-                
-                log::info("Downloaded and cached {} object IDs", OBJECT_IDS.size());
-            } catch (std::exception& e) {
-                log::error("Failed to process downloaded object_ids.json: {}", e.what());
+            } else {
+                log::warn("GitHub fetch failed with HTTP {}", res->code());
             }
         }
     });
-    
-    auto req = web::WebRequest();
-    listener.setFilter(req.get("https://raw.githubusercontent.com/entity12208/EditorAI/refs/heads/main/resources/object_ids.json"));
+    listener.setFilter(task);
 }
 
 // Helper to mask API keys in logs
 static std::string maskApiKey(const std::string& key) {
     if (key.length() <= 8) return "***";
     return key.substr(0, 4) + "..." + key.substr(key.length() - 4);
-}
-
-// Parse HEX color string to ccColor3B
-static ccColor3B parseHexColor(const std::string& hex) {
-    if (hex.length() != 6 && hex.length() != 7) {
-        return {255, 255, 255}; // Default to white
-    }
-    
-    std::string cleanHex = hex;
-    if (cleanHex[0] == '#') {
-        cleanHex = cleanHex.substr(1);
-    }
-    
-    try {
-        unsigned int hexValue = std::stoul(cleanHex, nullptr, 16);
-        return {
-            static_cast<GLubyte>((hexValue >> 16) & 0xFF),
-            static_cast<GLubyte>((hexValue >> 8) & 0xFF),
-            static_cast<GLubyte>(hexValue & 0xFF)
-        };
-    } catch (...) {
-        return {255, 255, 255};
-    }
 }
 
 // Parse API error and return user-friendly message
@@ -199,97 +173,6 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
     return {title, message};
 }
 
-// Helper to configure trigger properties
-// NOTE: Limited by Geode bindings - logs configuration for future implementation
-static void configureTrigger(GameObject* trigger, matjson::Value& triggerData) {
-    if (!trigger) return;
-    
-    int objectID = trigger->m_objectID;
-    bool isTrigger = (objectID == TRIGGER_ALPHA || objectID == TRIGGER_MOVE || objectID == TRIGGER_TOGGLE);
-    
-    if (!isTrigger) return;
-    
-    log::info("Creating trigger {} at position ({}, {})", objectID, trigger->getPositionX(), trigger->getPositionY());
-    
-    // Log target group configuration (for future when bindings expose trigger internals)
-    auto targetGroupResult = triggerData["target_group"].asInt();
-    if (targetGroupResult) {
-        int targetGroup = targetGroupResult.unwrap();
-        log::info("  Target Group: {}", targetGroup);
-    }
-    
-    // Log touch-triggered mode
-    auto touchTriggeredResult = triggerData["touch_triggered"].asBool();
-    if (touchTriggeredResult && touchTriggeredResult.unwrap()) {
-        log::info("  Touch Triggered: YES");
-    }
-    
-    // Log trigger-specific configurations
-    switch (objectID) {
-        case TRIGGER_ALPHA: {
-            auto opacityResult = triggerData["opacity"].asDouble();
-            if (opacityResult) {
-                float opacity = static_cast<float>(opacityResult.unwrap());
-                log::info("  Opacity: {}", opacity);
-            }
-            
-            auto durationResult = triggerData["duration"].asDouble();
-            if (durationResult) {
-                float duration = static_cast<float>(durationResult.unwrap());
-                log::info("  Duration: {} seconds", duration);
-            }
-            break;
-        }
-        
-        case TRIGGER_MOVE: {
-            auto moveXResult = triggerData["move_x"].asDouble();
-            auto moveYResult = triggerData["move_y"].asDouble();
-            
-            if (moveXResult || moveYResult) {
-                float moveX = moveXResult ? static_cast<float>(moveXResult.unwrap()) : 0.0f;
-                float moveY = moveYResult ? static_cast<float>(moveYResult.unwrap()) : 0.0f;
-                log::info("  Move Offset: ({}, {})", moveX, moveY);
-            }
-            
-            auto durationResult = triggerData["duration"].asDouble();
-            if (durationResult) {
-                float duration = static_cast<float>(durationResult.unwrap());
-                log::info("  Duration: {} seconds", duration);
-            }
-            
-            auto easingResult = triggerData["easing"].asInt();
-            if (easingResult) {
-                int easing = easingResult.unwrap();
-                log::info("  Easing: {}", easing);
-            }
-            break;
-        }
-        
-        case TRIGGER_TOGGLE: {
-            auto activateResult = triggerData["activate_group"].asBool();
-            if (activateResult) {
-                bool activate = activateResult.unwrap();
-                log::info("  Activate: {}", activate ? "ON" : "OFF");
-            }
-            break;
-        }
-    }
-    
-    // Assign groups to the trigger object itself (for trigger activation control)
-    auto groupsData = triggerData["groups"];
-    if (groupsData.isArray() && trigger->m_groups) {
-        for (size_t g = 0; g < groupsData.size() && trigger->m_groupCount < 10; g++) {
-            auto groupResult = groupsData[g].asInt();
-            if (groupResult) {
-                int groupID = groupResult.unwrap();
-                (*trigger->m_groups)[trigger->m_groupCount] = static_cast<short>(groupID);
-                trigger->m_groupCount++;
-                log::info("  Assigned to Group: {}", groupID);
-            }
-        }
-    }
-}
-
 // API Key Entry Popup
 class APIKeyPopup : public Popup<std::function<void(std::string)>> {
 protected:
@@ -318,7 +201,6 @@ protected:
         m_mainLayer->addChild(inputBG);
         
         m_keyInput = TextInput::create(350, "sk-...", "bigFont.fnt");
-        m_keyInput->setAllowedChars("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_!@#$%^&*()+=[]{}|;:',.<>?/~`");
         m_keyInput->setPosition({winSize.width / 2, winSize.height / 2});
         m_keyInput->setScale(0.6f);
         m_keyInput->setMaxCharCount(500);
@@ -370,6 +252,13 @@ public:
     }
 };
 
+// Structure to hold object data for deferred creation
+struct DeferredObject {
+    int objectID;
+    CCPoint position;
+    matjson::Value data;
+};
+
 // AI Generator Popup
 class AIGeneratorPopup : public Popup<LevelEditorLayer*> {
 protected:
@@ -381,6 +270,11 @@ protected:
     bool m_shouldClearLevel = true;
     LevelEditorLayer* m_editorLayer = nullptr;
     EventListener<web::WebTask> m_listener;
+    
+    // CRASH FIX: Deferred object creation
+    std::vector<DeferredObject> m_deferredObjects;
+    size_t m_currentObjectIndex = 0;
+    bool m_isCreatingObjects = false;
 
     bool setup(LevelEditorLayer* editorLayer) {
         m_editorLayer = editorLayer;
@@ -483,6 +377,9 @@ protected:
         cornerMenu->addChild(keyBtn);
         m_mainLayer->addChild(cornerMenu);
 
+        // CRASH FIX: Schedule progressive object creation
+        this->schedule(schedule_selector(AIGeneratorPopup::updateObjectCreation), 0.05f);
+
         return true;
     }
 
@@ -493,40 +390,35 @@ protected:
     void onInfo(CCObject*) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model = Mod::get()->getSettingValue<std::string>("model");
-        bool rateLimiting = Mod::get()->getSettingValue<bool>("enable-rate-limiting");
-        bool colors = Mod::get()->getSettingValue<bool>("enable-colors");
-        bool groups = Mod::get()->getSettingValue<bool>("enable-group-ids");
-        bool triggers = Mod::get()->getSettingValue<bool>("enable-triggers");
 
-        std::string features = "<cy>Features:</c>\n";
-        if (colors) features += "• <cg>Color Control</c>\n";
-        if (groups) features += "• <cg>Group IDs</c>\n";
-        if (triggers) features += "• <cg>Trigger Support</c>\n";
-
+        std::string objectSource = "defaults";
+        if (OBJECT_IDS.size() > 10) {
+            objectSource = "local file (auto-updates from GitHub)";
+        } else if (OBJECT_IDS.size() > 5) {
+            objectSource = "local file";
+        }
+        
         FLAlertLayer::create(
             "Editor AI",
             gd::string(fmt::format(
                 "<cy>Direct API Integration</c>\n\n"
                 "<cg>Provider:</c> <co>{}</co>\n"
-                "<cg>Model:</c> <co>{}</co>\n"
-                "<cy>Rate Limiting:</c> {}\n\n"
-                "{}\n"
+                "<cg>Model:</c> <co>{}</co>\n\n"
                 "<cy>Setup:</c>\n"
-                "• Click lock icon to enter API key\n"
+                "• For Cloud AI: Click lock icon for API key\n"
+                "• For Ollama: Just select in settings!\n"
                 "• Select provider & model in settings\n"
-                "• Configure features in settings\n"
                 "• Start generating!\n\n"
-                "<co>Loaded {} object types</co>\n\n"
-                "<cl>Trigger Support:</cl>\n"
-                "• Alpha Trigger (1007)\n"
-                "• Move Trigger (901)\n"
-                "• Toggle Trigger (1049)\n\n"
-                "<cp>Available on all platforms!</cp>",
+                "<co>Loaded {} object types from {}</co>\n\n"
+                "<cl>v2.1.2 - Ollama Integration</cl>\n"
+                "• Added full Ollama support (local AI)\n"
+                "• Auto-updates object library from GitHub\n"
+                "• Fixed crashes with editor-collab mod\n"
+                "• Progressive object spawning",
                 provider,
                 model,
-                rateLimiting ? "<cg>On</c>" : "<cr>Off</c>",
-                features,
-                OBJECT_IDS.size()
+                OBJECT_IDS.size(),
+                objectSource
             )),
             "OK"
         )->show();
@@ -588,7 +480,143 @@ protected:
         log::info("Cleared {} objects from editor", toRemove->count());
     }
 
-    void createObjects(matjson::Value& objectsArray) {
+    // CRASH FIX: Progressive object creation - one object per frame
+    void updateObjectCreation(float dt) {
+        if (!m_isCreatingObjects || m_deferredObjects.empty()) return;
+        
+        // Check if all objects have been created
+        if (m_currentObjectIndex >= m_deferredObjects.size()) {
+            m_isCreatingObjects = false;
+            
+            // Update editor UI after all objects created
+            if (m_editorLayer && m_editorLayer->m_editorUI) {
+                m_editorLayer->m_editorUI->updateButtons();
+            }
+            
+            showStatus(fmt::format("✓ Created {} objects!", m_deferredObjects.size()), false);
+            
+            Notification::create(
+                fmt::format("Generated {} objects!", m_deferredObjects.size()),
+                NotificationIcon::Success
+            )->show();
+            
+            // Auto-close after success
+            auto closeAction = CCSequence::create(
+                CCDelayTime::create(2.0f),
+                CCCallFunc::create(this, callfunc_selector(AIGeneratorPopup::closePopup)),
+                nullptr
+            );
+            this->runAction(closeAction);
+            
+            m_deferredObjects.clear();
+            m_currentObjectIndex = 0;
+            return;
+        }
+        
+        // CRITICAL: Create ONE object per frame to avoid overwhelming the editor
+        try {
+            auto& deferred = m_deferredObjects[m_currentObjectIndex];
+            
+            // SAFETY CHECK: Verify editor layer still exists
+            if (!m_editorLayer) {
+                log::error("Editor layer destroyed during object creation!");
+                m_isCreatingObjects = false;
+                return;
+            }
+            
+            // CRITICAL: Create object with comprehensive error handling
+            GameObject* gameObj = nullptr;
+            try {
+                gameObj = m_editorLayer->createObject(deferred.objectID, deferred.position, false);
+            } catch (std::exception& e) {
+                log::warn("Exception creating object {}: {}", m_currentObjectIndex, e.what());
+                m_currentObjectIndex++;
+                return;
+            } catch (...) {
+                log::warn("Unknown exception creating object {}", m_currentObjectIndex);
+                m_currentObjectIndex++;
+                return;
+            }
+            
+            // CRITICAL: Verify object was actually created
+            if (!gameObj) {
+                log::warn("Failed to create object {} (ID: {}) - skipping", 
+                         m_currentObjectIndex, deferred.objectID);
+                m_currentObjectIndex++;
+                return;
+            }
+            
+            // CRITICAL: Verify object state is valid before modification
+            if (!gameObj->m_objectID) {
+                log::warn("Object {} has invalid state - skipping properties", m_currentObjectIndex);
+                m_currentObjectIndex++;
+                return;
+            }
+            
+            // Apply properties safely
+            applyObjectProperties(gameObj, deferred.data);
+            
+            // Update progress indicator every 10 objects
+            if (m_currentObjectIndex % 10 == 0) {
+                float progress = (float)m_currentObjectIndex / m_deferredObjects.size() * 100.0f;
+                showStatus(fmt::format("Creating objects... {:.0f}%", progress), false);
+            }
+            
+            m_currentObjectIndex++;
+            
+        } catch (std::exception& e) {
+            log::error("Exception in updateObjectCreation: {}", e.what());
+            m_currentObjectIndex++;
+        } catch (...) {
+            log::error("Unknown exception in updateObjectCreation");
+            m_currentObjectIndex++;
+        }
+    }
+
+    // CRASH FIX: Safe property application with validation
+    void applyObjectProperties(GameObject* gameObj, matjson::Value& objData) {
+        if (!gameObj) return;
+        
+        try {
+            // Rotation
+            auto rotResult = objData["rotation"].asDouble();
+            if (rotResult) {
+                float rotation = static_cast<float>(rotResult.unwrap());
+                if (rotation >= -360.0f && rotation <= 360.0f) {
+                    gameObj->setRotation(rotation);
+                }
+            }
+
+            // Scale
+            auto scaleResult = objData["scale"].asDouble();
+            if (scaleResult) {
+                float scale = static_cast<float>(scaleResult.unwrap());
+                if (scale >= 0.1f && scale <= 10.0f) {
+                    gameObj->setScale(scale);
+                }
+            }
+
+            // Flip X
+            auto flipXResult = objData["flip_x"].asBool();
+            if (flipXResult && flipXResult.unwrap()) {
+                gameObj->setScaleX(-gameObj->getScaleX());
+            }
+
+            // Flip Y
+            auto flipYResult = objData["flip_y"].asBool();
+            if (flipYResult && flipYResult.unwrap()) {
+                gameObj->setScaleY(-gameObj->getScaleY());
+            }
+            
+        } catch (std::exception& e) {
+            log::warn("Failed to apply object properties: {}", e.what());
+        } catch (...) {
+            log::warn("Unknown exception applying object properties");
+        }
+    }
+
+    // CRASH FIX: Prepare objects for deferred creation instead of creating immediately
+    void prepareObjects(matjson::Value& objectsArray) {
         if (!m_editorLayer) {
             log::error("No editor layer!");
             return;
@@ -599,15 +627,13 @@ protected:
             return;
         }
 
-        bool enableColors = Mod::get()->getSettingValue<bool>("enable-colors");
-        bool enableGroups = Mod::get()->getSettingValue<bool>("enable-group-ids");
-        bool enableTriggers = Mod::get()->getSettingValue<bool>("enable-triggers");
+        m_deferredObjects.clear();
+        m_currentObjectIndex = 0;
 
-        int created = 0;
-        int triggers = 0;
         int maxObjects = Mod::get()->getSettingValue<int64_t>("max-objects");
-
         size_t objectCount = std::min(objectsArray.size(), static_cast<size_t>(maxObjects));
+
+        log::info("Preparing {} objects for progressive creation...", objectCount);
 
         for (size_t i = 0; i < objectCount; i++) {
             try {
@@ -625,78 +651,29 @@ protected:
                 float x = static_cast<float>(xResult.unwrap());
                 float y = static_cast<float>(yResult.unwrap());
 
-                auto gameObj = m_editorLayer->createObject(objectID, {x, y}, false);
-
-                if (!gameObj) {
+                // Validate object ID
+                if (objectID < 1 || objectID > 10000) {
+                    log::warn("Invalid object ID {} at index {}", objectID, i);
                     continue;
                 }
 
-                // Standard properties
-                auto rotResult = objData["rotation"].asDouble();
-                if (rotResult) {
-                    gameObj->setRotation(static_cast<float>(rotResult.unwrap()));
-                }
-
-                auto scaleResult = objData["scale"].asDouble();
-                if (scaleResult) {
-                    gameObj->setScale(static_cast<float>(scaleResult.unwrap()));
-                }
-
-                auto flipXResult = objData["flip_x"].asBool();
-                if (flipXResult && flipXResult.unwrap()) {
-                    gameObj->setScaleX(-gameObj->getScaleX());
-                }
-
-                auto flipYResult = objData["flip_y"].asBool();
-                if (flipYResult && flipYResult.unwrap()) {
-                    gameObj->setScaleY(-gameObj->getScaleY());
-                }
-
-                // Initial Colors
-                if (enableColors && objData.contains("color")) {
-                    auto colorResult = objData["color"].asString();
-                    if (colorResult) {
-                        auto color = parseHexColor(colorResult.unwrap());
-                        gameObj->setObjectColor(color);
-                        log::debug("Set color {} on object {}", colorResult.unwrap(), objectID);
-                    }
-                }
-
-                // Group IDs
-                if (enableGroups && objData.contains("groups")) {
-                    auto groupsData = objData["groups"];
-                    if (groupsData.isArray()) {
-                        for (size_t g = 0; g < groupsData.size(); g++) {
-                            auto groupResult = groupsData[g].asInt();
-                            if (groupResult) {
-                                int groupID = groupResult.unwrap();
-                                gameObj->addToGroup(groupID);
-                                log::debug("Added object {} to group {}", objectID, groupID);
-                            }
-                        }
-                    }
-                }
-
-                // Trigger Configuration
-                bool isTrigger = (objectID == TRIGGER_ALPHA || objectID == TRIGGER_MOVE || objectID == TRIGGER_TOGGLE);
-                if (enableTriggers && isTrigger) {
-                    configureTrigger(gameObj, objData);
-                    triggers++;
-                    log::info("Configured trigger {} at ({}, {})", objectID, x, y);
-                }
-
-                created++;
+                // Store for deferred creation
+                DeferredObject deferred;
+                deferred.objectID = objectID;
+                deferred.position = CCPoint{x, y};
+                deferred.data = objData;
+                m_deferredObjects.push_back(deferred);
 
             } catch (std::exception& e) {
-                log::warn("Failed to create object at index {}: {}", i, e.what());
+                log::warn("Failed to prepare object at index {}: {}", i, e.what());
             }
         }
 
-        log::info("Successfully created {} objects ({} triggers)", created, triggers);
+        log::info("Prepared {} valid objects for creation", m_deferredObjects.size());
 
-        if (auto editorUI = m_editorLayer->m_editorUI) {
-            editorUI->updateButtons();
-        }
+        // Start progressive creation
+        m_isCreatingObjects = true;
+        showStatus("Starting object creation...", false);
     }
 
     std::string buildSystemPrompt() {
@@ -712,60 +689,22 @@ protected:
             }
         }
 
-        bool enableColors = Mod::get()->getSettingValue<bool>("enable-colors");
-        bool enableGroups = Mod::get()->getSettingValue<bool>("enable-group-ids");
-        bool enableTriggers = Mod::get()->getSettingValue<bool>("enable-triggers");
-
-        std::string features;
-        if (enableColors || enableGroups || enableTriggers) {
-            features = "\n\n<cy>ENABLED FEATURES:</c>\n";
-            if (enableColors) {
-                features += "- You can set \"color\": \"#RRGGBB\" (HEX) on objects\n";
-            }
-            if (enableGroups) {
-                features += "- You can set \"groups\": [1, 2, 3] (array of group IDs) on objects\n";
-            }
-            if (enableTriggers) {
-                features += "- You can use TRIGGERS with full configuration:\n"
-                                       "  \n"
-                                       "  Alpha Trigger (alpha_trigger):\n"
-                                       "  {{\"type\": \"alpha_trigger\", \"x\": 100, \"y\": 0,\n"
-                                       "   \"target_group\": 1, \"opacity\": 0.5, \"duration\": 1.0,\n"
-                                       "   \"touch_triggered\": true}}\n"
-                                       "  \n"
-                                       "  Move Trigger (move_trigger):\n"
-                                       "  {{\"type\": \"move_trigger\", \"x\": 200, \"y\": 0,\n"
-                                       "   \"target_group\": 1, \"move_x\": 100, \"move_y\": 50,\n"
-                                       "   \"duration\": 2.0, \"easing\": 1, \"touch_triggered\": true}}\n"
-                                       "  \n"
-                                       "  Toggle Trigger (toggle_trigger):\n"
-                                       "  {{\"type\": \"toggle_trigger\", \"x\": 300, \"y\": 0,\n"
-                                       "   \"target_group\": 2, \"activate_group\": true,\n"
-                                       "   \"touch_triggered\": true}}\n"
-                                       "  \n"
-                                       "  - Use groups to organize objects and triggers\n"
-                                       "  - Touch-triggered triggers activate on player contact\n"
-                                       "  - Combine triggers for complex mechanics\n";
-            }
-        }
-
         return fmt::format(
             "You are a Geometry Dash level designer AI.\n\n"
             "Return ONLY valid JSON - no markdown, no explanations.\n\n"
-            "Available objects: {}{}\n\n"
+            "Available objects: {}\n\n"
             "JSON Format:\n"
             "{{\n"
             "  \"analysis\": \"Brief reasoning\",\n"
             "  \"objects\": [\n"
-            "    {{\"type\": \"block_black_gradient_square\", \"x\": 0, \"y\": 30}},\n"
-            "    {{\"type\": \"spike_black_gradient_spike\", \"x\": 150, \"y\": 0}}\n"
+            "    {{\"type\": \"block_black_gradient\", \"x\": 0, \"y\": 30}},\n"
+            "    {{\"type\": \"spike\", \"x\": 150, \"y\": 0}}\n"
             "  ]\n"
             "}}\n\n"
             "Coordinates: X=horizontal (10 units=1 grid), Y=vertical (0=ground, 30=1 block up)\n"
             "Spacing: EASY=150-200, MEDIUM=90-150, HARD=60-90, EXTREME=30-60 units\n"
             "Length: SHORT=500-1000, MEDIUM=1000-2000, LONG=2000-4000, XL=4000-8000, XXL=8000+ X units",
-            objectList,
-            features
+            objectList
         );
     }
 
@@ -850,6 +789,26 @@ protected:
             requestBody["max_tokens"] = 4096;
 
             url = "https://api.openai.com/v1/chat/completions";
+
+        } else if (provider == "ollama") {
+            std::string ollamaUrl = Mod::get()->getSettingValue<std::string>("ollama-url");
+            std::string ollamaModel = Mod::get()->getSettingValue<std::string>("ollama-model");
+
+            // Combine system and user prompts for Ollama
+            std::string combinedPrompt = systemPrompt + "\n\n" + fullPrompt;
+
+            requestBody = matjson::Value::object();
+            requestBody["model"] = ollamaModel;
+            requestBody["prompt"] = combinedPrompt;
+            requestBody["stream"] = false;  // Disable streaming for simpler handling
+            requestBody["format"] = "json";  // Request JSON output
+            
+            auto options = matjson::Value::object();
+            options["temperature"] = 0.7;
+            requestBody["options"] = options;
+
+            url = ollamaUrl + "/api/generate";
+            log::info("Using Ollama at: {}", url);
         }
 
         std::string jsonBody = requestBody.dump();
@@ -873,6 +832,7 @@ protected:
         } else if (provider == "openai") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
         }
+        // Ollama doesn't need API key headers (local server)
 
         request.bodyString(jsonBody);
         m_listener.setFilter(request.post(url));
@@ -886,37 +846,17 @@ protected:
             return;
         }
 
+        std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string apiKey = Mod::get()->getSavedValue<std::string>("api-key", "");
 
-        if (apiKey.empty()) {
+        // Ollama doesn't need an API key (local server)
+        if (apiKey.empty() && provider != "ollama") {
             FLAlertLayer::create(
                 "API Key Required",
                 gd::string("Please click the lock icon to enter your API key!"),
                 "OK"
             )->show();
             return;
-        }
-
-        // Rate limiting check
-        if (Mod::get()->getSettingValue<bool>("enable-rate-limiting")) {
-            int rateLimitSeconds = Mod::get()->getSettingValue<int64_t>("rate-limit-seconds");
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastRequestTime).count();
-
-            if (elapsed < rateLimitSeconds) {
-                int remaining = rateLimitSeconds - elapsed;
-                FLAlertLayer::create(
-                    "Rate Limit",
-                    gd::string(fmt::format(
-                        "Please wait {} more second{} before generating again.\n\n"
-                        "This prevents excessive API usage and saves tokens.",
-                        remaining,
-                        remaining == 1 ? "" : "s"
-                    )),
-                    "OK"
-                )->show();
-                return;
-            }
         }
 
         m_generateBtn->setEnabled(false);
@@ -930,9 +870,6 @@ protected:
 
         log::info("=== Generation Request ===");
         log::info("Prompt: {}", prompt);
-
-        // Update rate limit tracker
-        lastRequestTime = std::chrono::steady_clock::now();
 
         callAPI(prompt, apiKey);
     }
@@ -1003,6 +940,22 @@ protected:
                     return;
                 }
                 aiResponse = textResult.unwrap();
+            } else if (provider == "ollama") {
+                // Ollama has a simpler response format
+                auto responseResult = json["response"].asString();
+                if (!responseResult) {
+                    onError("Invalid Response", "Failed to extract Ollama response.");
+                    return;
+                }
+                aiResponse = responseResult.unwrap();
+                
+                // Check if generation completed
+                auto doneResult = json["done"].asBool();
+                if (doneResult && !doneResult.unwrap()) {
+                    log::warn("Ollama response marked as incomplete");
+                }
+                
+                log::info("Received Ollama response ({} chars)", aiResponse.length());
             }
 
             // Clean markdown code blocks
@@ -1047,12 +1000,6 @@ protected:
                 return;
             }
 
-            showStatus("Creating objects...");
-
-            if (m_shouldClearLevel) {
-                clearLevel();
-            }
-
             // Convert types to IDs
             for (size_t i = 0; i < objectsArray.size(); i++) {
                 auto obj = objectsArray[i];
@@ -1067,21 +1014,13 @@ protected:
                 }
             }
 
-            createObjects(objectsArray);
+            // Clear level if requested
+            if (m_shouldClearLevel) {
+                clearLevel();
+            }
 
-            showStatus(fmt::format("✓ Created {} objects!", objectsArray.size()), false);
-
-            Notification::create(
-                fmt::format("Generated {} objects!", objectsArray.size()),
-                NotificationIcon::Success
-            )->show();
-
-            auto closeAction = CCSequence::create(
-                CCDelayTime::create(2.0f),
-                CCCallFunc::create(this, callfunc_selector(AIGeneratorPopup::closePopup)),
-                nullptr
-            );
-            this->runAction(closeAction);
+            // CRASH FIX: Prepare objects for progressive creation
+            prepareObjects(objectsArray);
 
         } catch (std::exception& e) {
             log::error("Exception during response processing: {}", e.what());
@@ -1219,37 +1158,20 @@ class $modify(LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("       Editor AI v2.4.0 Loaded");
-    log::info("   Cross-Platform Support Enabled!");
+    log::info("  Editor AI v2.1.2 - Ollama Integration");
     log::info("========================================");
-    
-    // Initialize rate limit tracker
-    lastRequestTime = std::chrono::steady_clock::now() - std::chrono::hours(1);
-    
-    // Load object IDs from cache or defaults
-    loadObjectIDs();
     log::info("Loaded {} object types", OBJECT_IDS.size());
-    
-    // Download latest object IDs from GitHub
-    downloadObjectIDs();
-    
-    // Log feature status
-    bool colors = Mod::get()->getSettingValue<bool>("enable-colors");
-    bool groups = Mod::get()->getSettingValue<bool>("enable-group-ids");
-    bool triggers = Mod::get()->getSettingValue<bool>("enable-triggers");
-    
-    log::info("Features: Colors={}, Groups={}, Triggers={}", colors, groups, triggers);
-    
-    // Log rate limiting status
-    bool rateLimiting = Mod::get()->getSettingValue<bool>("enable-rate-limiting");
-    if (rateLimiting) {
-        int seconds = Mod::get()->getSettingValue<int64_t>("rate-limit-seconds");
-        log::info("Rate limiting: ENABLED ({} seconds)", seconds);
+    if (OBJECT_IDS.size() > 10) {
+        log::info("Object library: Loaded from local file");
     } else {
-        log::info("Rate limiting: DISABLED");
+        log::info("Object library: Using defaults (5 objects)");
     }
-    
-    log::info("Trigger support: Alpha ({}), Move ({}), Toggle ({})", TRIGGER_ALPHA, TRIGGER_MOVE, TRIGGER_TOGGLE);
-    log::info("Platform support: Windows, Android32, Android64, MacOS, iOS");
+    log::info("Progressive object creation enabled");
+    log::info("Ollama (local AI) support enabled");
     log::info("========================================");
+    
+    // Schedule async GitHub update after a short delay
+    Loader::get()->queueInMainThread([] {
+        updateObjectIDsFromGitHub();
+    });
 }
