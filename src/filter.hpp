@@ -13,10 +13,6 @@ public:
         return true;
     }
 
-    void setMaxLabelLength(int v) {
-        CCTextInputNode::setMaxLabelLength(std::numeric_limits<int>::max());
-    }
-
     bool onTextFieldInsertText(cocos2d::CCTextFieldTTF* pSender, const char* text, int nLen, cocos2d::enumKeyCodes keyCodes) {
         if (text && nLen > 0) {
             try {
