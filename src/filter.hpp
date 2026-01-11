@@ -1,27 +1,29 @@
 #pragma once
-#include <climits>
-#include <Geode/binding/CCTextInputNode.hpp>
+#include <limits>
+#include <string>
+#include <Geode/Geode.hpp>
+#include <Geode/modify/CCTextInputNode.hpp>
 
 class $modify(CCTextInputNode) {
 public:
-    bool init(float width, float height, char const* placeholder, char const* textFont, int fontSize, char const* labelFont) {
+    bool init(float width, float height, const char* placeholder, const char* textFont, int fontSize, const char* labelFont) {
         if (!CCTextInputNode::init(width, height, placeholder, textFont, fontSize, labelFont))
             return false;
-        this->setMaxLabelLength(INT_MAX);
-        this->setAllowedChars(gd::string());
+        CCTextInputNode::setMaxLabelLength(std::numeric_limits<int>::max());
         return true;
     }
 
     void setMaxLabelLength(int v) {
-        CCTextInputNode::setMaxLabelLength(INT_MAX);
+        CCTextInputNode::setMaxLabelLength(std::numeric_limits<int>::max());
     }
 
-    bool onTextFieldInsertText(cocos2d::CCTextFieldTTF* pSender, char const* text, int nLen, cocos2d::enumKeyCodes keyCodes) {
+    bool onTextFieldInsertText(cocos2d::CCTextFieldTTF* pSender, const char* text, int nLen, cocos2d::enumKeyCodes keyCodes) {
         if (text && nLen > 0) {
             try {
                 auto cur = this->getString();
-                cur.append(text, static_cast<size_t>(nLen));
-                this->setString(cur);
+                std::string s = cur.c_str();
+                s.append(text, static_cast<size_t>(nLen));
+                this->setString(s.c_str());
                 return true;
             } catch (...) {}
         }
