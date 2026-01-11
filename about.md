@@ -1,43 +1,33 @@
 # Editor AI
 
-Generate Geometry Dash levels using AI! Supports Gemini, Claude, ChatGPT, and **Ollama (local AI - recommended)**.
-
-## What's New (v2.1.2)
-
-- **Ollama Support** - Free, unlimited local AI
-- **AI Naming** - Creative level titles
-- **AI Descriptions** - Engaging level descriptions
-- **Crash Fixes** - All editor mod conflicts resolved
-- **Advanced Editing** - Background, ground, speeds (opt-in)
-
-## Features
-
-- **4 AI Providers** - Cloud or local options
-- **9+ Models** - Balance speed vs quality
-- **1000+ Objects** - Auto-updating library
-- **Full Control** - Colors, groups, triggers
-- **Recommended**: Ollama for speed, quality, and zero cost
+AI-powered level generation for Geometry Dash. Describe your level in plain text and watch AI build it in the editor.
 
 ## Quick Start
 
-1. **Ollama (Free & Fast)**: Download [ollama.com](https://ollama.com), run `ollama run llama2`
-2. **Cloud API**: Get key from [ai.google.dev](https://ai.google.dev) (free)
-3. Open editor → AI button → Enter key (skip for Ollama)
-4. Describe level → Generate!
+1. Download the [latest release](https://github.com/entity12208/editorai/releases/latest)
+2. Open the game and navigate to the Geode page
+3. Press the manual download button and select the file
+4. Set up the mod
 
-## ⚠️ Important
+## AI Setup
 
-**Editor Collab mod must be disabled or uninstalled.** They are incompatible and will break each other.
+### Ollama
+1. Download and install [Ollama](https://ollama.com)
+2. Download the official model by running `ollama pull editorai:<model>`, where `model` can be either `deepseek` (more creative) or `qwen` (more powerful). Each is 5.2 GB.
+3. Ensure the setting `ollama model` is set to `editorai`.
+4. Change the other settings to your requirements.
 
-## Settings
+### Gemini, Claude, ChatGPT
 
-Configure in **Settings → Mods → Editor AI**:
-- Provider (gemini/claude/openai/**ollama**)
-- Model, difficulty, style, length
-- Max objects, colors, groups, triggers
+1. Get your API key for [Gemini](https://aistudio.google.com/u/0/api-keys), [Claude](https://console.anthropic.com), or [ChatGPT](https://platform.openai.com/api-keys).
+2. Set the setting `Model` to your perfered model used by your provider
+3. Once in the UI, click the lock icon.
+4. Paste your API key into the box and save it.
 
----
+## Usage
 
-**Developer**: entity12208  
-**Version**: 2.1.2  
-**Framework**: Geode SDK
+1. Download and set up the mod.
+2. Open the editor of any level.
+3. Press the AI button located in the top right.
+4. Enable or disable `Clear Level`, and enter your prompt into the box.
+5. Click `Generate` and wait!
