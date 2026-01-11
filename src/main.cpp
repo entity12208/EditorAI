@@ -5,6 +5,7 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include "filter.hpp"
 
 using namespace geode::prelude;
 
