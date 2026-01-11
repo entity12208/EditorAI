@@ -13,8 +13,8 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 
 ### Ollama
 1. Download and install [Ollama](https://ollama.com)
-2. Download the official model by running `ollama pull editorai:<model>`, where `model` can be either `deepseek` (more creative) or `qwen` (more powerful). Each is 5.2 GB.
-3. Ensure the setting `ollama model` is set to `editorai`.
+2. Download the official model by running `ollama pull entity12208/editorai:<model>`, where `model` can be either `deepseek` (more creative) or `qwen` (more powerful). Each is 5.2 GB.
+3. Ensure the setting `ollama model` is set to `entity12208/editorai:<model>`.
 4. Change the other settings to your requirements.
 
 ### Gemini, Claude, ChatGPT
