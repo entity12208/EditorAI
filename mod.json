@@ -10,7 +10,7 @@
   "name": "Editor AI",
   "version": "v2.1.2",
   "developer": "entity12208",
-  "description": "Generate Geometry Dash levels using AI! Supports Gemini, Claude, and ChatGPT with full trigger support (Alpha, Move, Toggle) and group IDs. Now available on all platforms!",
+  "description": "Generate Geometry Dash levels using AI!",
   "settings": {
     "ai-provider": {
       "type": "string",
@@ -22,7 +22,7 @@
     "model": {
       "type": "string",
       "name": "Model",
-      "description": "AI model to use",
+      "description": "Non-Ollama AI model to use",
       "default": "gemini-2.5-flash",
       "one-of": [
         "gemini-2.5-flash",
@@ -65,6 +65,22 @@
       "min": 10,
       "max": 1000000
     },
+    "ollama-section": {
+      "type": "title",
+      "name": "Ollama (Local AI)"
+    },
+    "ollama-url": {
+      "type": "string",
+      "name": "Ollama Server URL",
+      "description": "URL of your local Ollama server",
+      "default": "http://localhost:11434"
+    },
+    "ollama-model": {
+      "type": "string",
+      "name": "Ollama Model",
+      "description": "Model name (auto-detected when Ollama is running)",
+      "default": "editorai"
+    },
     "rate-limiting-section": {
       "type": "title",
       "name": "Rate Limiting"
@@ -82,7 +98,7 @@
       "default": 3,
       "min": 1,
       "max": 60,
-      "enableIf": "enable-rate-limiting"
+      "enable-if": "enable-rate-limiting"
     },
     "features-section": {
       "type": "title",
@@ -115,42 +131,8 @@
       "name": "Advanced Level Settings",
       "description": "Allow AI to modify level settings like background/ground colors, start speed/mode, dual mode, etc. WARNING: This is experimental!",
       "default": false
-    },
-    "ollama-section": {
-      "type": "title",
-      "name": "Ollama (Local AI)"
-    },
-    "ollama-url": {
-      "type": "string",
-      "name": "Ollama Server URL",
-      "description": "URL of your local Ollama server",
-      "default": "http://localhost:11434"
-    },
-    "ollama-model": {
-      "type": "string",
-      "name": "Ollama Model",
-      "description": "Model name (auto-detected when Ollama is running)",
-      "default": "deepseek-v3.1:671b-cloud"
-    },
-    "api-key-info": {
-      "type": "title",
-      "name": "API Key Management"
-    },
-    "api-key-status": {
-      "type": "string",
-      "name": "Status",
-      "description": "Current API key status",
-      "default": "No API key saved",
-      "enableIf": "false"
     }
   },
-  "platforms": [
-    "win",
-    "android32",
-    "android64",
-    "mac",
-    "ios"
-  ],
   "tags": [
     "editor",
     "utility",
