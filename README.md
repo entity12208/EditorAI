@@ -1,6 +1,7 @@
 # Editor AI
 
 AI-powered level generation for Geometry Dash. Describe your level in plain text and watch AI build it in the editor.
+**If you would like to continue seeing development on this project, please star it so I know people are interested.**
 
 ## Quick Start
 
