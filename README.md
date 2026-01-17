@@ -2,6 +2,8 @@
 
 AI-powered level generation for Geometry Dash. Describe your level in plain text and watch AI build it in the editor.
 
+*Consider supporting the project by starring it on [Github](https://github.com/entity12208/editorai)*
+
 ## Quick Start
 
 1. Download the [latest release](https://github.com/entity12208/editorai/releases/latest)
@@ -12,6 +14,9 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 ## AI Setup
 
 ### Ollama
+
+*Though Ollama does use ~5.2 GB storage, it is still the recommended option for anyone who has 6+ GB VRAM, as it is free permanently and easy to set up.*
+
 1. Download and install [Ollama](https://ollama.com)
 2. Download the official model by running `ollama pull entity12208/editorai:<model>`, where `model` can be either `deepseek` (more creative) or `qwen` (more powerful). Each is 5.2 GB.
 3. Ensure the setting `ollama model` is set to `entity12208/editorai:<model>`.
