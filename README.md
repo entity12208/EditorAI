@@ -36,3 +36,7 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 3. Press the AI button located in the top right.
 4. Enable or disable `Clear Level`, and enter your prompt into the box.
 5. Click `Generate` and wait!
+
+## Support
+
+Join the [Editor AI Discord server](https://discord.gg/5hwCqMUYNj) for support and ideas.
