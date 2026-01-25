@@ -1159,7 +1159,7 @@ class $modify(LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("  Editor AI v2.1.2 - Ollama Integration");
+    log::info("         Editor AI v2.1.3");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     if (OBJECT_IDS.size() > 10) {
@@ -1167,8 +1167,6 @@ $execute {
     } else {
         log::info("Object library: Using defaults (5 objects)");
     }
-    log::info("Progressive object creation enabled");
-    log::info("Ollama (local AI) support enabled");
     log::info("========================================");
     
     // Schedule async GitHub update after a short delay
