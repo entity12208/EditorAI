@@ -1159,7 +1159,7 @@ class $modify(LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("         Editor AI v2.1.3");
+    log::info("         Editor AI v2.1.4");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     if (OBJECT_IDS.size() > 10) {
