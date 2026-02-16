@@ -13,6 +13,9 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 
 ## AI Setup
 
+### EditorAI Platinum
+[EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a major P2P network recently created to run Ollama on other people's computers. Completely for free, any user can run the Official Ollama models via the internet. Visit the repository to set it up yourself. If you would like to donate your computer, follow the instructions in the repository.
+
 ### Ollama
 
 *Though Ollama does use ~5.2 GB storage, it is still the recommended option for anyone who has 6+ GB VRAM, as it is free permanently and easy to set up.*
@@ -25,7 +28,7 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 ### Gemini, Claude, ChatGPT
 
 1. Get your API key for [Gemini](https://aistudio.google.com/u/0/api-keys), [Claude](https://console.anthropic.com), or [ChatGPT](https://platform.openai.com/api-keys).
-2. Set the setting `Model` to your perfered model used by your provider
+2. Set the setting `Model` to your preferred model used by your provider
 3. Once in the UI, click the lock icon.
 4. Paste your API key into the box and save it.
 
