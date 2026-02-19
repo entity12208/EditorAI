@@ -1,14 +1,14 @@
 {
-  "geode": "4.10.2",
+  "geode": "5.0.0-beta.3",
   "gd": {
-    "win": "2.2074",
-    "android": "2.2074",
-    "mac": "2.2074",
-    "ios": "2.2074"
+    "win": "2.2081",
+    "android": "2.2081",
+    "mac": "2.2081",
+    "ios": "2.2081"
   },
   "id": "entity12208.edit-ai",
   "name": "Editor AI",
-  "version": "v2.1.4",
+  "version": "v2.1.5",
   "developer": "entity12208",
   "description": "Generate Geometry Dash levels using AI!",
   "settings": {
@@ -64,6 +64,14 @@
       "default": 500,
       "min": 10,
       "max": 1000000
+    },
+    "spawn-batch-size": {
+      "type": "int",
+      "name": "Spawn Speed (Objects/Tick)",
+      "description": "How many objects to place per tick after generation. Higher = faster but may cause brief lag on large levels. Default 8 is a good balance.",
+      "default": 8,
+      "min": 1,
+      "max": 100
     },
     "ollama-section": {
       "type": "title",
