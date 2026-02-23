@@ -1,23 +1,4 @@
 // Editor AI - main.cpp  v2.2.0
-//
-// New in v2.2.0:
-//  - Provider-specific model + API key settings (no more lock-icon popup)
-//  - Added Mistral AI (Ministral) provider
-//  - Added HuggingFace Inference API provider
-//  - Ollama: Use Platinum toggle (replaces URL text field); model is now a dropdown
-//  - Merged all advanced feature flags into one enable-advanced-features bool
-//  - Color Trigger (ID 899) support: AI can place color triggers with hex color,
-//    channel, duration, blending, and opacity when advanced features are on
-//  - Group ID support: AI can assign up to 10 group IDs per object
-//
-// Move Trigger (ID 901) — RESEARCH NOTES (not yet implemented):
-//   Cast created object to EffectGameObject*
-//   effectObj->m_targetGroupID = groupToMove;      // property 51
-//   effectObj->m_moveOffset    = {deltaX, deltaY}; // properties 28/29
-//   effectObj->m_duration      = seconds;           // property 10
-//   effectObj->m_easingType    = EasingType::None;  // property 30
-//   effectObj->m_isTouchTriggered = true;            // property 11
-//   Then call: m_editorLayer->addToGroups(effectObj, false);
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
@@ -27,6 +8,7 @@
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <algorithm>
 
 using namespace geode::prelude;
 
