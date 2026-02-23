@@ -1,5 +1,3 @@
-// Editor AI - main.cpp  v2.2.0
-
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -562,7 +560,7 @@ protected:
                 // Color channel (which GD color channel to modify, 1-999)
                 auto channelResult = objData["color_channel"].asInt();
                 if (channelResult) {
-                    effectObj->m_targetColor = std::clamp(channelResult.unwrap(), 1, 999);
+                    effectObj->m_targetColor = std::clamp((int)channelResult.unwrap(), 1, 999);
                 }
 
                 // Hex color "#RRGGBB"
