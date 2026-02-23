@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -6,7 +7,6 @@
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 #include <Geode/ui/TextInput.hpp>
-#include <algorithm>
 
 using namespace geode::prelude;
 
@@ -407,8 +407,11 @@ protected:
             float rot = gameObj->getRotation();
             float scl = gameObj->getScale();
 
-            std::string typeName = (id == 899) ? "color_trigger" : "unknown";
-            if (typeName == "unknown") {
+            std::string typeName;
+            if (id == 899) typeName = "color_trigger";
+            else if (id == 901) typeName = "move_trigger";
+            else {
+                typeName = "unknown";
                 auto it = idToName.find(id);
                 if (it != idToName.end()) typeName = it->second;
             }
@@ -596,6 +599,57 @@ protected:
                 effectObj->m_isTouchTriggered = true;
             }
 
+            // ── Move Trigger properties (advanced features, ID 901) ────────────
+            // AI specifies move triggers as:
+            // {
+            //   "type": "move_trigger", "x": ..., "y": 0,
+            //   "target_group": 1,       -- int 1-9999, group of objects to move
+            //   "move_x": 150,           -- horizontal offset in units (30 = 1 cell)
+            //   "move_y": 0,             -- vertical offset in units
+            //   "duration": 0.5,         -- transition time in seconds
+            //   "easing": 0             -- (optional) 0=None,1=EaseInOut,2=EaseIn,3=EaseOut,
+            //                           --   4=ElasticInOut,5=ElasticIn,6=ElasticOut,
+            //                           --   7=BounceInOut,8=BounceIn,9=BounceOut
+            // }
+            if (advFeatures && gameObj->m_objectID == 901) {
+                auto* effectObj = static_cast<EffectGameObject*>(gameObj);
+
+                // Which group to move
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                // X and Y movement offset (in GD units; 30 units = 1 grid cell)
+                auto moveXResult = objData["move_x"].asDouble();
+                auto moveYResult = objData["move_y"].asDouble();
+                float offsetX = moveXResult ? static_cast<float>(moveXResult.unwrap()) : 0.0f;
+                float offsetY = moveYResult ? static_cast<float>(moveYResult.unwrap()) : 0.0f;
+                // Clamp to a sane range (±32,767 units)
+                offsetX = std::clamp(offsetX, -32767.0f, 32767.0f);
+                offsetY = std::clamp(offsetY, -32767.0f, 32767.0f);
+                effectObj->m_moveOffset = {offsetX, offsetY};
+
+                // Duration
+                auto durResult = objData["duration"].asDouble();
+                if (durResult) {
+                    effectObj->m_duration = std::clamp(
+                        static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
+                }
+
+                // Easing type (integer 0–18, cast directly as the game does)
+                auto easingResult = objData["easing"].asInt();
+                if (easingResult) {
+                    int easingVal = std::clamp((int)easingResult.unwrap(), 0, 18);
+                    effectObj->m_easingType = (EasingType)easingVal;
+                } else {
+                    effectObj->m_easingType = EasingType::None;
+                }
+
+                // Touch-triggered so it fires when the player passes
+                effectObj->m_isTouchTriggered = true;
+            }
+
         } catch (...) {
             log::warn("Failed to apply object properties");
         }
@@ -623,6 +677,8 @@ protected:
                     const std::string& typeName = typeResult.unwrap();
                     if (typeName == "color_trigger") {
                         objectsArray[i]["id"] = 899;
+                    } else if (typeName == "move_trigger") {
+                        objectsArray[i]["id"] = 901;
                     } else {
                         auto it = OBJECT_IDS.find(typeName);
                         objectsArray[i]["id"] = (it != OBJECT_IDS.end()) ? it->second : 1;
@@ -696,26 +752,55 @@ protected:
                 "\n\n"
                 "ADVANCED FEATURES (enabled):\n\n"
 
-                "1. GROUP IDs — Any object can be assigned up to 10 group IDs using the optional\n"
-                "   \"groups\" field. Groups let triggers target specific objects by ID.\n"
-                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 30, \"groups\": [1, 5]}\n\n"
+                "JSON FORMAT RULES — follow exactly or the response will fail to parse:\n"
+                "  • Return ONLY the JSON object — no markdown, no comments, no trailing commas\n"
+                "  • All string values must use double quotes\n"
+                "  • Numbers must not be quoted: \"x\": 150 not \"x\": \"150\"\n"
+                "  • Arrays use square brackets: \"groups\": [1, 5]\n"
+                "  • Do not include fields with null values — omit them entirely\n\n"
 
-                "2. COLOR TRIGGERS — Place color trigger objects to animate GD color channels.\n"
-                "   Use type \"color_trigger\" (object ID 899). They fire when the player touches them.\n"
+                "1. GROUP IDs — Assign up to 10 group IDs per object with the optional \"groups\" array.\n"
+                "   Objects must be in a group for a move/toggle trigger to target them.\n"
+                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 30, \"groups\": [1]}\n\n"
+
+                "2. COLOR TRIGGERS (type \"color_trigger\", ID 899)\n"
+                "   Place at x positions where the color should change; set y to 0 (ground-level).\n"
+                "   They fire automatically when the player reaches them.\n"
                 "   Required fields:\n"
-                "     \"color_channel\": integer 1-999 — which GD color channel to modify\n"
-                "     \"color\": \"#RRGGBB\" — target hex color\n"
+                "     \"color_channel\": integer 1–999 — which GD channel to change\n"
+                "       (1=Background, 2=Ground1, 3=Line, 4=Object, 1000=Player1, 1001=Player2)\n"
+                "     \"color\": \"#RRGGBB\" — target hex color (6 hex digits after #)\n"
                 "   Optional fields:\n"
-                "     \"duration\": float, seconds for the transition (default 0.5)\n"
-                "     \"blending\": bool, additive blending mode (default false)\n"
-                "     \"opacity\": float 0.0-1.0 (default 1.0)\n"
-                "   Example: {\"type\": \"color_trigger\", \"x\": 500, \"y\": 0,\n"
-                "             \"color_channel\": 1, \"color\": \"#FF4400\", \"duration\": 1.0}\n\n"
+                "     \"duration\": float seconds (default 0.5)\n"
+                "     \"blending\": true/false — additive blend (default false)\n"
+                "     \"opacity\": 0.0–1.0 (default 1.0)\n"
+                "   Example: {\"type\":\"color_trigger\",\"x\":500,\"y\":0,\"color_channel\":1,\"color\":\"#FF4400\",\"duration\":1.0}\n\n"
 
-                "   Common GD color channels: 1=BG, 2=G1, 3=Line, 4=Obj, 1000=P1, 1001=P2\n\n"
+                "3. MOVE TRIGGERS (type \"move_trigger\", ID 901)\n"
+                "   Move a group of objects by an offset over time. Objects must already have a\n"
+                "   matching group ID assigned via the \"groups\" field.\n"
+                "   Place the trigger at y=0 so the player activates it on the ground.\n"
+                "   Required fields:\n"
+                "     \"target_group\": integer 1–9999 — group ID to move (must match object groups)\n"
+                "     \"move_x\": float — horizontal distance in GD units (30 = 1 grid cell, negative = left)\n"
+                "     \"move_y\": float — vertical distance in GD units (positive = up)\n"
+                "   Optional fields:\n"
+                "     \"duration\": float seconds (default 0.5)\n"
+                "     \"easing\": integer 0–9\n"
+                "       0=None, 1=EaseInOut, 2=EaseIn, 3=EaseOut,\n"
+                "       4=ElasticInOut, 5=ElasticIn, 6=ElasticOut,\n"
+                "       7=BounceInOut, 8=BounceIn, 9=BounceOut\n"
+                "   IMPORTANT: The trigger and the objects it moves are SEPARATE. Place the trigger\n"
+                "   where the player will reach it, and place the objects being moved wherever they\n"
+                "   should start (they will shift by move_x/move_y when the trigger fires).\n"
+                "   Example:\n"
+                "     Objects to move:    {\"type\":\"block_black_gradient_square\",\"x\":800,\"y\":90,\"groups\":[2]}\n"
+                "     Trigger to fire it: {\"type\":\"move_trigger\",\"x\":500,\"y\":0,\"target_group\":2,\"move_x\":0,\"move_y\":90,\"duration\":0.5,\"easing\":1}\n\n"
 
-                "Use these features purposefully to enhance the visual experience.\n"
-                "Place color triggers at natural progression points (e.g. every drop or section change).";
+                "Use advanced features purposefully to enhance the level. Color triggers set the mood\n"
+                "at natural section changes (drops, transitions). Move triggers add dynamic platforming\n"
+                "elements like rising platforms or sliding walls. Keep group IDs consistent — if a\n"
+                "move trigger targets group 2, the objects it should move must have 2 in their groups array.\n";
         }
 
         return base;
