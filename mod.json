@@ -1,5 +1,5 @@
 {
-  "geode": "5.0.0-beta.3",
+  "geode": "5.0.0",
   "gd": {
     "win": "2.2081",
     "android": "2.2081",
@@ -11,42 +11,34 @@
   "version": "v2.1.5",
   "developer": "entity12208",
   "description": "Generate Geometry Dash levels using AI!",
+  "dependencies": {
+    "geode.node-ids": ">=v1.0.0"
+  },
   "settings": {
+
     "ai-provider": {
       "type": "string",
       "name": "AI Provider",
-      "description": "Which AI service to use",
+      "description": "Which AI service to use. Configure the corresponding section below for your chosen provider.",
       "default": "gemini",
-      "one-of": ["gemini", "claude", "openai", "ollama"]
+      "one-of": ["gemini", "claude", "openai", "ministral", "huggingface", "ollama"]
     },
-    "model": {
-      "type": "string",
-      "name": "Model",
-      "description": "Non-Ollama AI model to use",
-      "default": "gemini-2.5-flash",
-      "one-of": [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
-        "claude-sonnet-4-5-20250929",
-        "claude-haiku-4-5-20251001",
-        "claude-opus-4-5-20251101",
-        "gpt-5.2-2025-12-11",
-        "gpt-5-mini-2025-08-07",
-        "gpt-5-nano-2025-08-07"
-      ]
+
+    "general-section": {
+      "type": "title",
+      "name": "General"
     },
     "difficulty": {
       "type": "string",
       "name": "Difficulty",
-      "description": "Default difficulty level",
+      "description": "Default difficulty level for generated levels",
       "default": "medium",
       "one-of": ["easy", "medium", "hard", "extreme"]
     },
     "style": {
       "type": "string",
       "name": "Style",
-      "description": "Visual style preference",
+      "description": "Visual style preference for generated levels",
       "default": "modern",
       "one-of": ["modern", "retro", "minimalist", "decorated"]
     },
@@ -60,35 +52,148 @@
     "max-objects": {
       "type": "int",
       "name": "Max Objects",
-      "description": "Maximum objects per generation",
+      "description": "Maximum number of objects the AI may place per generation",
       "default": 500,
       "min": 10,
-      "max": 1000000
+      "max": 10000
     },
     "spawn-batch-size": {
       "type": "int",
       "name": "Spawn Speed (Objects/Tick)",
-      "description": "How many objects to place per tick after generation. Higher = faster but may cause brief lag on large levels. Default 8 is a good balance.",
+      "description": "How many objects to place per tick after generation. Higher = faster but may cause brief lag on large levels. 8 is a good balance.",
       "default": 8,
       "min": 1,
       "max": 100
     },
+
+    "gemini-section": {
+      "type": "title",
+      "name": "Gemini"
+    },
+    "gemini-model": {
+      "type": "string",
+      "name": "Gemini Model",
+      "description": "Google Gemini model to use when AI Provider is set to 'gemini'",
+      "default": "gemini-2.0-flash-latest",
+      "one-of": [
+        "gemini-flash-latest",
+        "gemini-pro-latest"
+      ]
+    },
+    "gemini-api-key": {
+      "type": "string",
+      "name": "Gemini API Key",
+      "description": "Your Google AI Studio API key",
+      "default": ""
+    },
+
+    "claude-section": {
+      "type": "title",
+      "name": "Claude"
+    },
+    "claude-model": {
+      "type": "string",
+      "name": "Claude Model",
+      "description": "Anthropic Claude model to use when AI Provider is set to 'claude'",
+      "default": "claude-sonnet-4-6",
+      "one-of": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6"
+      ]
+    },
+    "claude-api-key": {
+      "type": "string",
+      "name": "Claude API Key",
+      "description": "Your Anthropic API key",
+      "default": ""
+    },
+
+    "openai-section": {
+      "type": "title",
+      "name": "OpenAI"
+    },
+    "openai-model": {
+      "type": "string",
+      "name": "OpenAI Model",
+      "description": "OpenAI model to use when AI Provider is set to 'openai'",
+      "default": "gpt-4o",
+      "one-of": [
+        "gpt-4o",
+        "gpt-4.1-mini",
+        "o1-mini"
+      ]
+    },
+    "openai-api-key": {
+      "type": "string",
+      "name": "OpenAI API Key",
+      "description": "Your OpenAI API key",
+      "default": ""
+    },
+
+    "ministral-section": {
+      "type": "title",
+      "name": "Mistral AI"
+    },
+    "ministral-model": {
+      "type": "string",
+      "name": "Ministral Model",
+      "description": "Mistral AI model to use when AI Provider is set to 'ministral'",
+      "default": "ministral-8b-latest",
+      "one-of": [
+        "ministral-3b-latest",
+        "ministral-8b-latest",
+        "mistral-small-latest",
+        "mistral-medium-latest",
+        "mistral-large-latest"
+      ]
+    },
+    "ministral-api-key": {
+      "type": "string",
+      "name": "Mistral API Key",
+      "description": "Your Mistral AI API key",
+      "default": ""
+    },
+
+    "huggingface-section": {
+      "type": "title",
+      "name": "HuggingFace"
+    },
+    "huggingface-model": {
+      "type": "string",
+      "name": "HuggingFace Model ID",
+      "description": "HuggingFace model to use",
+      "default": "meta-llama/Llama-3.1-8B-Instruct"
+    },
+    "huggingface-api-key": {
+      "type": "string",
+      "name": "HuggingFace API Key",
+      "description": "Your HuggingFace token",
+      "default": ""
+    },
+
     "ollama-section": {
       "type": "title",
-      "name": "Ollama (Local AI)"
+      "name": "Ollama"
     },
-    "ollama-url": {
-      "type": "string",
-      "name": "Ollama Server URL",
-      "description": "URL of your local Ollama server",
-      "default": "http://localhost:11434"
+    "use-platinum": {
+      "type": "bool",
+      "name": "Use Platinum (Cloud)",
+      "description": "Use the EditorAI Platinum cloud Ollama service instead of a local Ollama instance",
+      "default": false
     },
     "ollama-model": {
       "type": "string",
       "name": "Ollama Model",
-      "description": "Model name (auto-detected when Ollama is running)",
-      "default": "editorai"
+      "description": "Which EditorAI Ollama model to use",
+      "default": "entity12208/editorai:deepseek",
+      "one-of": [
+        "entity12208/editorai:deepseek",
+        "entity12208/editorai:qwen",
+        "entity12208/editorai:qwen-learning",
+        "gpt-oss:120b-cloud"
+      ]
     },
+
     "rate-limiting-section": {
       "type": "title",
       "name": "Rate Limiting"
@@ -108,38 +213,18 @@
       "max": 60,
       "enable-if": "enable-rate-limiting"
     },
-    "features-section": {
+
+    "advanced-features-section": {
       "type": "title",
-      "name": "Features"
+      "name": "Advanced Features"
     },
-    "enable-colors": {
+    "enable-advanced-features": {
       "type": "bool",
-      "name": "AI Color Control",
-      "description": "Allow AI to set object colors",
-      "default": false
-    },
-    "enable-group-ids": {
-      "type": "bool",
-      "name": "AI Group IDs",
-      "description": "Allow AI to assign Group IDs to objects",
-      "default": false
-    },
-    "enable-triggers": {
-      "type": "bool",
-      "name": "Trigger Support ⚡",
-      "description": "AI can create and configure Alpha, Move, and Toggle triggers with touch activation",
-      "default": false
-    },
-    "advanced-level-editing-section": {
-      "type": "title",
-      "name": "⚠️ Advanced Level Editing (Experimental)"
-    },
-    "enable-advanced-level-editing": {
-      "type": "bool",
-      "name": "Advanced Level Settings",
-      "description": "Allow AI to modify level settings like background/ground colors, start speed/mode, dual mode, etc. WARNING: This is experimental!",
+      "name": "Enable Advanced Features",
+      "description": "Unlocks all experimental AI capabilities. May produce less stable results.",
       "default": false
     }
+
   },
   "tags": [
     "editor",
@@ -148,6 +233,7 @@
   ],
   "links": {
     "source": "https://github.com/Entity12208/EditorAI",
-    "community": "https://discord.gg/5hwCqMUYNj"
+    "community": "https://discord.gg/5hwCqMUYNj",
+    "homepage": "https://editorai.pages.dev"
   }
 }

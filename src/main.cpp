@@ -1,3 +1,24 @@
+// Editor AI - main.cpp  v2.2.0
+//
+// New in v2.2.0:
+//  - Provider-specific model + API key settings (no more lock-icon popup)
+//  - Added Mistral AI (Ministral) provider
+//  - Added HuggingFace Inference API provider
+//  - Ollama: Use Platinum toggle (replaces URL text field); model is now a dropdown
+//  - Merged all advanced feature flags into one enable-advanced-features bool
+//  - Color Trigger (ID 899) support: AI can place color triggers with hex color,
+//    channel, duration, blending, and opacity when advanced features are on
+//  - Group ID support: AI can assign up to 10 group IDs per object
+//
+// Move Trigger (ID 901) — RESEARCH NOTES (not yet implemented):
+//   Cast created object to EffectGameObject*
+//   effectObj->m_targetGroupID = groupToMove;      // property 51
+//   effectObj->m_moveOffset    = {deltaX, deltaY}; // properties 28/29
+//   effectObj->m_duration      = seconds;           // property 10
+//   effectObj->m_easingType    = EasingType::None;  // property 30
+//   effectObj->m_isTouchTriggered = true;            // property 11
+//   Then call: m_editorLayer->addToGroups(effectObj, false);
+
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -91,43 +112,66 @@ static void updateObjectIDsFromGitHub() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-static std::string maskApiKey(const std::string& key) {
-    if (key.length() <= 8) return "***";
-    return key.substr(0, 4) + "..." + key.substr(key.length() - 4);
+// Returns true if the model name is an o-series reasoning model.
+// These models reject the "temperature" parameter and return HTTP 400 if sent.
+static bool isOSeriesModel(const std::string& model) {
+    if (model.size() < 2) return false;
+    return (model[0] == 'o' && model[1] >= '1' && model[1] <= '9');
+}
+
+// Parse a 6-digit hex color string "#RRGGBB" or "RRGGBB" into r, g, b.
+// Returns false if the string is invalid.
+static bool parseHexColor(const std::string& hex, GLubyte& r, GLubyte& g, GLubyte& b) {
+    std::string h = hex;
+    if (!h.empty() && h[0] == '#') h = h.substr(1);
+    if (h.length() < 6) return false;
+    try {
+        r = (GLubyte)std::stoi(h.substr(0, 2), nullptr, 16);
+        g = (GLubyte)std::stoi(h.substr(2, 2), nullptr, 16);
+        b = (GLubyte)std::stoi(h.substr(4, 2), nullptr, 16);
+        return true;
+    } catch (...) { return false; }
 }
 
 static std::pair<std::string, std::string> parseAPIError(const std::string& errorBody, int statusCode) {
-    std::string title = "API Error";
+    std::string title   = "API Error";
     std::string message = "An unknown error occurred. Please try again.";
     try {
         auto json = matjson::parse(errorBody);
         if (!json) return {title, message};
         auto error = json.unwrap();
         std::string errorMsg;
+
+        // Standard format: {"error": {"message": "..."}}  (OpenAI, Claude, Mistral)
         if (error.contains("error")) {
             auto errorObj = error["error"];
-            if (errorObj.contains("message")) {
+            if (errorObj.isObject() && errorObj.contains("message")) {
                 auto msgResult = errorObj["message"].asString();
                 if (msgResult) errorMsg = msgResult.unwrap();
+            } else {
+                // HuggingFace format: {"error": "message string"}
+                auto directMsg = errorObj.asString();
+                if (directMsg) errorMsg = directMsg.unwrap();
             }
         }
+
         if (statusCode == 401 || statusCode == 403) {
-            title = "Invalid API Key";
-            message = "Your API key is invalid or expired.\n\nPlease check your API key and try again.";
+            title   = "Invalid API Key";
+            message = "Your API key is invalid or expired.\n\nPlease check your API key in mod settings and try again.";
         } else if (statusCode == 429) {
-            title = "Rate Limit Exceeded";
-            if (errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos) {
-                message = "You've exceeded your API quota.\n\nPlease wait or upgrade your plan.";
-            } else {
-                message = "Too many requests.\n\nPlease wait a moment and try again.";
-            }
+            title   = "Rate Limit Exceeded";
+            message = (errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos)
+                ? "You've exceeded your API quota.\n\nPlease wait or upgrade your plan."
+                : "Too many requests.\n\nPlease wait a moment and try again.";
         } else if (statusCode == 400) {
-            title = "Invalid Request";
+            title   = "Invalid Request";
             message = errorMsg.find("model") != std::string::npos
-                ? "The selected model is invalid.\n\nPlease check your model settings."
+                ? "The selected model is invalid.\n\nPlease check your model setting."
                 : "The request was invalid.\n\nPlease check your settings and try again.";
+            if (!errorMsg.empty())
+                message += "\n\nDetail: " + errorMsg.substr(0, 150);
         } else if (statusCode >= 500) {
-            title = "Service Error";
+            title   = "Service Error";
             message = "The AI service is currently unavailable.\n\nPlease try again later.";
         } else if (!errorMsg.empty()) {
             message = errorMsg.substr(0, 200);
@@ -137,91 +181,33 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
     return {title, message};
 }
 
-// ─── API Key Popup ────────────────────────────────────────────────────────────
+// ─── Per-provider API key / model helpers ─────────────────────────────────────
 
-class APIKeyPopup : public Popup {
-protected:
-    TextInput* m_keyInput;
-    std::function<void(std::string)> m_callback;
+static std::string getProviderApiKey(const std::string& provider) {
+    if (provider == "gemini")       return Mod::get()->getSettingValue<std::string>("gemini-api-key");
+    if (provider == "claude")       return Mod::get()->getSettingValue<std::string>("claude-api-key");
+    if (provider == "openai")       return Mod::get()->getSettingValue<std::string>("openai-api-key");
+    if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-api-key");
+    if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-api-key");
+    return ""; // ollama — no key needed
+}
 
-    bool init(std::function<void(std::string)> callback) {
-        if (!Popup::init(400.f, 200.f))
-            return false;
+static std::string getProviderModel(const std::string& provider) {
+    if (provider == "gemini")       return Mod::get()->getSettingValue<std::string>("gemini-model");
+    if (provider == "claude")       return Mod::get()->getSettingValue<std::string>("claude-model");
+    if (provider == "openai")       return Mod::get()->getSettingValue<std::string>("openai-model");
+    if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-model");
+    if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-model");
+    if (provider == "ollama")       return Mod::get()->getSettingValue<std::string>("ollama-model");
+    return "unknown";
+}
 
-        m_callback = std::move(callback);
-        auto winSize = this->m_size;
-        this->setTitle("Enter API Key");
-
-        auto descLabel = CCLabelBMFont::create("Paste your API key below:", "bigFont.fnt");
-        descLabel->setScale(0.4f);
-        descLabel->setPosition({winSize.width / 2, winSize.height / 2 + 50});
-        m_mainLayer->addChild(descLabel);
-
-        auto inputBG = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
-        inputBG->setContentSize({360, 40});
-        inputBG->setColor({0, 0, 0});
-        inputBG->setOpacity(100);
-        inputBG->setPosition({winSize.width / 2, winSize.height / 2});
-        m_mainLayer->addChild(inputBG);
-
-        m_keyInput = TextInput::create(350, "Paste key here...", "bigFont.fnt");
-        m_keyInput->setPosition({winSize.width / 2, winSize.height / 2});
-        m_keyInput->setScale(0.6f);
-        m_keyInput->setMaxCharCount(500);
-        m_keyInput->setPasswordMode(true);
-
-        // Fix: set allowed chars directly on the underlying CCTextInputNode so that
-        // _, -, and all other valid API key characters can actually be typed.
-        // This replaces the old global CCTextInputNode hook from filter.hpp.
-        m_keyInput->getInputNode()->setAllowedChars(
-            "abcdefghijklmnopqrstuvwxyz"
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "0123456789-_=+/\\.,;:!@#$%^&*()[]{}|<>?`~ \"\'"
-        );
-
-        m_mainLayer->addChild(m_keyInput);
-
-        auto saveBtn = CCMenuItemSpriteExtra::create(
-            ButtonSprite::create("Save", "goldFont.fnt", "GJ_button_01.png", 0.8f),
-            this, menu_selector(APIKeyPopup::onSave)
-        );
-        auto cancelBtn = CCMenuItemSpriteExtra::create(
-            ButtonSprite::create("Cancel", "bigFont.fnt", "GJ_button_06.png", 0.8f),
-            this, menu_selector(APIKeyPopup::onClose)
-        );
-
-        auto btnMenu = CCMenu::create();
-        btnMenu->setPosition({winSize.width / 2, winSize.height / 2 - 65});
-        saveBtn->setPosition({-50, 0});
-        cancelBtn->setPosition({50, 0});
-        btnMenu->addChild(saveBtn);
-        btnMenu->addChild(cancelBtn);
-        m_mainLayer->addChild(btnMenu);
-
-        return true;
-    }
-
-    void onSave(CCObject*) {
-        std::string key = m_keyInput->getString();
-        if (!key.empty() && key != "Paste key here...") {
-            m_callback(key);
-            this->onClose(nullptr);
-        } else {
-            FLAlertLayer::create("Error", gd::string("Please enter a valid API key"), "OK")->show();
-        }
-    }
-
-public:
-    static APIKeyPopup* create(std::function<void(std::string)> callback) {
-        auto ret = new APIKeyPopup();
-        if (ret->init(std::move(callback))) {
-            ret->autorelease();
-            return ret;
-        }
-        delete ret;
-        return nullptr;
-    }
-};
+static std::string getOllamaUrl() {
+    bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
+    return usePlatinum
+        ? "https://ollama-proxy-sh88.onrender.com"
+        : "http://localhost:11434";
+}
 
 // ─── Deferred object struct ───────────────────────────────────────────────────
 
@@ -235,13 +221,16 @@ struct DeferredObject {
 
 class AIGeneratorPopup : public Popup {
 protected:
-    TextInput*               m_promptInput     = nullptr;
-    CCLabelBMFont*           m_statusLabel     = nullptr;
-    LoadingCircle*           m_loadingCircle   = nullptr;
-    CCMenuItemSpriteExtra*   m_generateBtn     = nullptr;
-    CCMenuItemToggler*       m_clearToggle     = nullptr;
-    bool                     m_shouldClearLevel = true;
-    LevelEditorLayer*        m_editorLayer     = nullptr;
+    TextInput*               m_promptInput    = nullptr;
+    CCLabelBMFont*           m_statusLabel    = nullptr;
+    LoadingCircle*           m_loadingCircle  = nullptr;
+    CCMenuItemSpriteExtra*   m_generateBtn    = nullptr;
+    CCMenuItemToggler*       m_clearToggle    = nullptr;
+
+    // Default to false — clearing is destructive and must be explicitly opted into.
+    bool                     m_shouldClearLevel = false;
+
+    LevelEditorLayer*        m_editorLayer    = nullptr;
 
     async::TaskHolder<web::WebResponse> m_listener;
 
@@ -259,13 +248,11 @@ protected:
         auto winSize  = this->m_size;
         this->setTitle("Editor AI");
 
-        // Description label
         auto descLabel = CCLabelBMFont::create("Describe the level you want to generate:", "bigFont.fnt");
         descLabel->setScale(0.45f);
         descLabel->setPosition({winSize.width / 2, winSize.height / 2 + 70});
         m_mainLayer->addChild(descLabel);
 
-        // Prompt input background
         auto inputBG = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
         inputBG->setContentSize({360, 100});
         inputBG->setColor({0, 0, 0});
@@ -273,22 +260,18 @@ protected:
         inputBG->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_mainLayer->addChild(inputBG);
 
-        // Prompt text input
         m_promptInput = TextInput::create(350, "e.g. Medium difficulty platforming", "bigFont.fnt");
         m_promptInput->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_promptInput->setScale(0.65f);
         m_promptInput->setMaxCharCount(200);
-
-        // Allow all printable characters in the prompt box (same fix as API key input)
         m_promptInput->getInputNode()->setAllowedChars(
             "abcdefghijklmnopqrstuvwxyz"
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
             "0123456789-_=+/\\.,;:!@#$%^&*()[]{}|<>?`~'\" "
         );
-
         m_mainLayer->addChild(m_promptInput);
 
-        // Clear-level toggle
+        // Clear-level toggle — default OFF
         auto clearLabel = CCLabelBMFont::create("Clear level before generating", "bigFont.fnt");
         clearLabel->setScale(0.4f);
 
@@ -299,7 +282,7 @@ protected:
 
         m_clearToggle = CCMenuItemToggler::create(offSpr, onSpr, this,
             menu_selector(AIGeneratorPopup::onToggleClear));
-        m_clearToggle->toggle(true);
+        m_clearToggle->toggle(false);
 
         auto toggleMenu = CCMenu::create();
         toggleMenu->setPosition({winSize.width / 2, winSize.height / 2 - 35});
@@ -309,14 +292,12 @@ protected:
         toggleMenu->addChild(clearLabel);
         m_mainLayer->addChild(toggleMenu);
 
-        // Status label
         m_statusLabel = CCLabelBMFont::create("", "bigFont.fnt");
         m_statusLabel->setScale(0.4f);
         m_statusLabel->setPosition({winSize.width / 2, winSize.height / 2 - 60});
         m_statusLabel->setVisible(false);
         m_mainLayer->addChild(m_statusLabel);
 
-        // Generate button
         m_generateBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("Generate", "goldFont.fnt", "GJ_button_01.png", 0.8f),
             this, menu_selector(AIGeneratorPopup::onGenerate)
@@ -327,25 +308,18 @@ protected:
         btnMenu->addChild(m_generateBtn);
         m_mainLayer->addChild(btnMenu);
 
-        // Info + key corner buttons
+        // Info button only (lock icon removed — keys are now in settings)
         auto infoBtn = CCMenuItemSpriteExtra::create(
             []{ auto s = CCSprite::createWithSpriteFrameName("GJ_infoIcon_001.png"); s->setScale(0.7f); return s; }(),
             this, menu_selector(AIGeneratorPopup::onInfo)
-        );
-        auto keyBtn = CCMenuItemSpriteExtra::create(
-            []{ auto s = CCSprite::createWithSpriteFrameName("GJ_lock_001.png"); s->setScale(0.7f); return s; }(),
-            this, menu_selector(AIGeneratorPopup::onKeyButton)
         );
 
         auto cornerMenu = CCMenu::create();
         cornerMenu->setPosition({winSize.width - 25, winSize.height - 25});
         infoBtn->setPosition({0, 0});
-        keyBtn->setPosition({-35, 0});
         cornerMenu->addChild(infoBtn);
-        cornerMenu->addChild(keyBtn);
         m_mainLayer->addChild(cornerMenu);
 
-        // Tick-based object spawner (every 0.05 s)
         this->schedule(schedule_selector(AIGeneratorPopup::updateObjectCreation), 0.05f);
 
         return true;
@@ -355,21 +329,27 @@ protected:
 
     void onToggleClear(CCObject*) {
         m_shouldClearLevel = !m_shouldClearLevel;
+        log::info("Clear level toggle: {}", m_shouldClearLevel ? "ON" : "OFF");
     }
 
     void onInfo(CCObject*) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+        std::string model    = getProviderModel(provider);
+        std::string apiKey   = getProviderApiKey(provider);
 
-        // Show the effective model name for both Ollama and cloud providers
-        std::string model = (provider == "ollama")
-            ? Mod::get()->getSettingValue<std::string>("ollama-model")
-            : Mod::get()->getSettingValue<std::string>("model");
+        std::string keyStatus;
+        if (provider == "ollama") {
+            bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
+            keyStatus = usePlatinum ? "<cg>Platinum cloud</c>" : "<cg>Local — no key needed</c>";
+        } else {
+            keyStatus = apiKey.empty()
+                ? "<cr>Not set — go to mod settings</c>"
+                : "<cg>Set</c>";
+        }
 
-        // Key status (Ollama doesn't need one)
-        std::string apiKey    = Mod::get()->getSavedValue<std::string>("api-key", "");
-        std::string keyStatus = (provider == "ollama")
-            ? "<cg>Not required</c>"
-            : (apiKey.empty() ? "<cr>Not set — click the lock icon</c>" : "<cg>Set</c>");
+        bool advFeatures = Mod::get()->getSettingValue<bool>("enable-advanced-features");
+        int currentObjects = (m_editorLayer && m_editorLayer->m_objects)
+            ? m_editorLayer->m_objects->count() : 0;
 
         FLAlertLayer::create(
             "Editor AI",
@@ -377,34 +357,15 @@ protected:
                 "<cy>Provider:</c> {}\n"
                 "<cy>Model:</c> {}\n"
                 "<cy>API Key:</c> {}\n"
-                "<cy>Objects in library:</c> {}",
-                provider, model, keyStatus, OBJECT_IDS.size()
+                "<cy>Advanced Features:</c> {}\n"
+                "<cy>Objects in library:</c> {}\n"
+                "<cy>Objects in level:</c> {}",
+                provider, model, keyStatus,
+                advFeatures ? "<cg>ON</c>" : "<cr>OFF</c>",
+                OBJECT_IDS.size(), currentObjects
             )),
             "OK"
         )->show();
-    }
-
-    void onKeyButton(CCObject*) {
-        std::string currentKey = Mod::get()->getSavedValue<std::string>("api-key", "");
-        if (!currentKey.empty()) {
-            geode::createQuickPopup(
-                "API Key",
-                fmt::format("Saved key: {}\n\nDelete it?", maskApiKey(currentKey)),
-                "Cancel", "Delete",
-                [](FLAlertLayer*, bool btn2) {
-                    if (btn2) {
-                        Mod::get()->setSavedValue<std::string>("api-key", std::string());
-                        Notification::create("API Key Deleted", NotificationIcon::Success)->show();
-                    }
-                }
-            );
-        } else {
-            APIKeyPopup::create([](std::string key) {
-                Mod::get()->setSavedValue("api-key", key);
-                Notification::create("API Key Saved!", NotificationIcon::Success)->show();
-                log::info("API key saved");
-            })->show();
-        }
     }
 
     void showStatus(const std::string& msg, bool error = false) {
@@ -417,8 +378,8 @@ protected:
 
     void clearLevel() {
         if (!m_editorLayer) return;
-        auto objects  = m_editorLayer->m_objects;
-        if (!objects)  return;
+        auto objects = m_editorLayer->m_objects;
+        if (!objects) return;
 
         auto toRemove = CCArray::create();
         for (auto* obj : CCArrayExt<CCObject*>(objects))
@@ -430,13 +391,74 @@ protected:
         log::info("Cleared {} objects from editor", toRemove->count());
     }
 
+    // Serialize the current editor objects to compact JSON so the AI can see what
+    // is already in the level. Capped at 300 objects to keep the prompt manageable.
+    std::string buildLevelDataJson() {
+        if (!m_editorLayer || !m_editorLayer->m_objects)
+            return "{\"object_count\":0,\"objects\":[]}";
+
+        auto objects = m_editorLayer->m_objects;
+        if (objects->count() == 0)
+            return "{\"object_count\":0,\"objects\":[]}";
+
+        std::unordered_map<int, std::string> idToName;
+        idToName.reserve(OBJECT_IDS.size());
+        for (auto& [name, id] : OBJECT_IDS) {
+            if (idToName.find(id) == idToName.end())
+                idToName[id] = name;
+        }
+
+        int totalCount = objects->count();
+        int maxReport  = std::min(totalCount, 300);
+
+        std::string result;
+        result.reserve(maxReport * 60);
+        result += fmt::format("{{\"object_count\":{},\"objects\":[", totalCount);
+
+        bool first   = true;
+        int reported = 0;
+        for (auto* raw : CCArrayExt<CCObject*>(objects)) {
+            if (reported >= maxReport) break;
+            auto* gameObj = typeinfo_cast<GameObject*>(raw);
+            if (!gameObj) continue;
+
+            int   id  = gameObj->m_objectID;
+            auto  pos = gameObj->getPosition();
+            float rot = gameObj->getRotation();
+            float scl = gameObj->getScale();
+
+            std::string typeName = (id == 899) ? "color_trigger" : "unknown";
+            if (typeName == "unknown") {
+                auto it = idToName.find(id);
+                if (it != idToName.end()) typeName = it->second;
+            }
+
+            if (!first) result += ",";
+            result += fmt::format(
+                "{{\"type\":\"{}\",\"x\":{:.0f},\"y\":{:.0f}",
+                typeName, pos.x, pos.y
+            );
+            if (rot != 0.0f) result += fmt::format(",\"rotation\":{:.1f}", rot);
+            if (scl != 1.0f) result += fmt::format(",\"scale\":{:.2f}", scl);
+            result += "}";
+
+            first = false;
+            ++reported;
+        }
+
+        if (totalCount > maxReport)
+            result += fmt::format(",{{\"note\":\"...{} more objects not shown\"}}", totalCount - maxReport);
+
+        result += "]}";
+        return result;
+    }
+
     // ── Progressive object spawner ────────────────────────────────────────────
 
     void updateObjectCreation(float /*dt*/) {
         if (!m_isCreatingObjects || m_deferredObjects.empty()) return;
 
         if (m_currentObjectIndex >= m_deferredObjects.size()) {
-            // All done
             m_isCreatingObjects = false;
             if (m_editorLayer && m_editorLayer->m_editorUI)
                 m_editorLayer->m_editorUI->updateButtons();
@@ -447,7 +469,6 @@ protected:
                 NotificationIcon::Success
             )->show();
 
-            // Auto-close after 2 seconds
             this->runAction(CCSequence::create(
                 CCDelayTime::create(2.0f),
                 CCCallFunc::create(this, callfunc_selector(AIGeneratorPopup::closePopup)),
@@ -459,7 +480,6 @@ protected:
             return;
         }
 
-        // Spawn up to batchSize objects this tick
         int batchSize = (int)Mod::get()->getSettingValue<int64_t>("spawn-batch-size");
         for (int b = 0; b < batchSize && m_currentObjectIndex < m_deferredObjects.size(); ++b) {
             try {
@@ -493,7 +513,6 @@ protected:
             ++m_currentObjectIndex;
         }
 
-        // Update progress label every 10 objects
         if (m_currentObjectIndex % 10 == 0) {
             float pct = (float)m_currentObjectIndex / (float)m_deferredObjects.size() * 100.0f;
             showStatus(fmt::format("Creating objects... {:.0f}%", pct), false);
@@ -502,18 +521,19 @@ protected:
 
     void applyObjectProperties(GameObject* gameObj, matjson::Value& objData) {
         if (!gameObj) return;
+        bool advFeatures = Mod::get()->getSettingValue<bool>("enable-advanced-features");
+
         try {
+            // ── Basic transform ───────────────────────────────────────────────
             auto rotResult = objData["rotation"].asDouble();
             if (rotResult) {
                 float r = static_cast<float>(rotResult.unwrap());
-                if (r >= -360.0f && r <= 360.0f)
-                    gameObj->setRotation(r);
+                if (r >= -360.0f && r <= 360.0f) gameObj->setRotation(r);
             }
             auto scaleResult = objData["scale"].asDouble();
             if (scaleResult) {
                 float s = static_cast<float>(scaleResult.unwrap());
-                if (s >= 0.1f && s <= 10.0f)
-                    gameObj->setScale(s);
+                if (s >= 0.1f && s <= 10.0f) gameObj->setScale(s);
             }
             auto flipXResult = objData["flip_x"].asBool();
             if (flipXResult && flipXResult.unwrap())
@@ -522,6 +542,80 @@ protected:
             auto flipYResult = objData["flip_y"].asBool();
             if (flipYResult && flipYResult.unwrap())
                 gameObj->setScaleY(-gameObj->getScaleY());
+
+            // ── Group IDs (advanced features) ─────────────────────────────────
+            // AI can assign up to 10 group IDs per object using:
+            //   "groups": [1, 5, 12]
+            // Groups enable triggers to target specific objects.
+            if (advFeatures && objData.contains("groups") && objData["groups"].isArray()) {
+                auto& groupsArr = objData["groups"];
+                int assigned = 0;
+                for (size_t gi = 0; gi < groupsArr.size() && assigned < 10; ++gi) {
+                    auto gid = groupsArr[gi].asInt();
+                    if (gid) {
+                        int groupID = gid.unwrap();
+                        if (groupID >= 1 && groupID <= 9999) {
+                            if (gameObj->addToGroup(groupID) == 1 && m_editorLayer) {
+                                m_editorLayer->addToGroup(gameObj, groupID, false);
+                                ++assigned;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Color Trigger properties (advanced features, ID 899) ───────────
+            // AI specifies color triggers as:
+            // {
+            //   "type": "color_trigger", "x": ..., "y": 0,
+            //   "color_channel": 1,          -- int 1-999, which channel to change
+            //   "color": "#FF8800",           -- hex color to set it to
+            //   "duration": 0.5,              -- transition time in seconds
+            //   "blending": false,            -- (optional) additive blending
+            //   "opacity": 1.0               -- (optional) 0.0 – 1.0
+            // }
+            if (advFeatures && gameObj->m_objectID == 899) {
+                auto* effectObj = static_cast<EffectGameObject*>(gameObj);
+
+                // Color channel (which GD color channel to modify, 1-999)
+                auto channelResult = objData["color_channel"].asInt();
+                if (channelResult) {
+                    effectObj->m_targetColor = std::clamp(channelResult.unwrap(), 1, 999);
+                }
+
+                // Hex color "#RRGGBB"
+                auto colorHexResult = objData["color"].asString();
+                if (colorHexResult) {
+                    GLubyte r = 255, g = 255, b = 255;
+                    if (parseHexColor(colorHexResult.unwrap(), r, g, b)) {
+                        effectObj->m_triggerTargetColor = {r, g, b};
+                    }
+                }
+
+                // Duration (seconds, 0 = instant)
+                auto durResult = objData["duration"].asDouble();
+                if (durResult) {
+                    effectObj->m_duration = std::clamp(
+                        static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
+                }
+
+                // Blending (additive color blend)
+                auto blendResult = objData["blending"].asBool();
+                if (blendResult) {
+                    effectObj->m_usesBlending = blendResult.unwrap();
+                }
+
+                // Opacity (0.0 – 1.0)
+                auto opacityResult = objData["opacity"].asDouble();
+                if (opacityResult) {
+                    effectObj->m_opacity = std::clamp(
+                        static_cast<float>(opacityResult.unwrap()), 0.0f, 1.0f);
+                }
+
+                // Touch-triggered by default so it fires when the player reaches it
+                effectObj->m_isTouchTriggered = true;
+            }
+
         } catch (...) {
             log::warn("Failed to apply object properties");
         }
@@ -541,6 +635,20 @@ protected:
             try {
                 auto objData = objectsArray[i];
 
+                // Resolve type name → numeric object ID
+                // "color_trigger" maps to ID 899 (GD color trigger)
+                // All other types look up OBJECT_IDS map
+                auto typeResult = objData["type"].asString();
+                if (typeResult) {
+                    const std::string& typeName = typeResult.unwrap();
+                    if (typeName == "color_trigger") {
+                        objectsArray[i]["id"] = 899;
+                    } else {
+                        auto it = OBJECT_IDS.find(typeName);
+                        objectsArray[i]["id"] = (it != OBJECT_IDS.end()) ? it->second : 1;
+                    }
+                }
+
                 auto idResult = objData["id"].asInt();
                 auto xResult  = objData["x"].asDouble();
                 auto yResult  = objData["y"].asDouble();
@@ -551,7 +659,7 @@ protected:
                 float x        = static_cast<float>(xResult.unwrap());
                 float y        = static_cast<float>(yResult.unwrap());
 
-                // Underground-block fix: clamp Y so objects are never placed below ground
+                // Clamp Y so objects are never placed underground
                 if (y < 0.0f) y = 0.0f;
 
                 if (objectID < 1 || objectID > 10000) {
@@ -573,8 +681,8 @@ protected:
     // ── System prompt ─────────────────────────────────────────────────────────
 
     std::string buildSystemPrompt() {
-        // Send the FULL object list — no arbitrary cap.
-        // This is intentionally verbose; cloud models have sufficient context windows.
+        bool advFeatures = Mod::get()->getSettingValue<bool>("enable-advanced-features");
+
         std::string objectList;
         objectList.reserve(OBJECT_IDS.size() * 30);
         bool first = true;
@@ -584,7 +692,7 @@ protected:
             first = false;
         }
 
-        return fmt::format(
+        std::string base = fmt::format(
             "You are a Geometry Dash level designer AI.\n\n"
             "Return ONLY valid JSON — no markdown, no explanations, no code fences.\n\n"
             "Available objects: {}\n\n"
@@ -602,13 +710,42 @@ protected:
             "Length: SHORT=500-1000, MEDIUM=1000-2000, LONG=2000-4000, XL=4000-8000, XXL=8000+ X units.",
             objectList
         );
+
+        if (advFeatures) {
+            base +=
+                "\n\n"
+                "ADVANCED FEATURES (enabled):\n\n"
+
+                "1. GROUP IDs — Any object can be assigned up to 10 group IDs using the optional\n"
+                "   \"groups\" field. Groups let triggers target specific objects by ID.\n"
+                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 30, \"groups\": [1, 5]}\n\n"
+
+                "2. COLOR TRIGGERS — Place color trigger objects to animate GD color channels.\n"
+                "   Use type \"color_trigger\" (object ID 899). They fire when the player touches them.\n"
+                "   Required fields:\n"
+                "     \"color_channel\": integer 1-999 — which GD color channel to modify\n"
+                "     \"color\": \"#RRGGBB\" — target hex color\n"
+                "   Optional fields:\n"
+                "     \"duration\": float, seconds for the transition (default 0.5)\n"
+                "     \"blending\": bool, additive blending mode (default false)\n"
+                "     \"opacity\": float 0.0-1.0 (default 1.0)\n"
+                "   Example: {\"type\": \"color_trigger\", \"x\": 500, \"y\": 0,\n"
+                "             \"color_channel\": 1, \"color\": \"#FF4400\", \"duration\": 1.0}\n\n"
+
+                "   Common GD color channels: 1=BG, 2=G1, 3=Line, 4=Obj, 1000=P1, 1001=P2\n\n"
+
+                "Use these features purposefully to enhance the visual experience.\n"
+                "Place color triggers at natural progression points (e.g. every drop or section change).";
+        }
+
+        return base;
     }
 
     // ── API call ──────────────────────────────────────────────────────────────
 
     void callAPI(const std::string& prompt, const std::string& apiKey) {
         std::string provider   = Mod::get()->getSettingValue<std::string>("ai-provider");
-        std::string model      = Mod::get()->getSettingValue<std::string>("model");
+        std::string model      = getProviderModel(provider);
         std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
         std::string style      = Mod::get()->getSettingValue<std::string>("style");
         std::string length     = Mod::get()->getSettingValue<std::string>("length");
@@ -616,16 +753,20 @@ protected:
         log::info("Calling {} API with model: {}", provider, model);
 
         std::string systemPrompt = buildSystemPrompt();
-        std::string fullPrompt   = fmt::format(
+        std::string levelData    = buildLevelDataJson();
+
+        std::string fullPrompt = fmt::format(
             "Generate a Geometry Dash level:\n\n"
             "Request: {}\nDifficulty: {}\nStyle: {}\nLength: {}\n\n"
+            "Current level data (you may build upon or extend these existing objects): {}\n\n"
             "Return JSON with analysis and objects array.",
-            prompt, difficulty, style, length
+            prompt, difficulty, style, length, levelData
         );
 
         matjson::Value requestBody;
         std::string    url;
 
+        // ── Gemini ─────────────────────────────────────────────────────────────
         if (provider == "gemini") {
             auto textPart = matjson::Value::object();
             textPart["text"] = systemPrompt + "\n\n" + fullPrompt;
@@ -639,8 +780,8 @@ protected:
             genConfig["temperature"]     = 0.7;
             genConfig["maxOutputTokens"] = 65536;
 
-            requestBody                    = matjson::Value::object();
-            requestBody["contents"]        = std::vector<matjson::Value>{message};
+            requestBody                     = matjson::Value::object();
+            requestBody["contents"]         = std::vector<matjson::Value>{message};
             requestBody["generationConfig"] = genConfig;
 
             url = fmt::format(
@@ -648,6 +789,8 @@ protected:
                 model, apiKey
             );
 
+        // ── Claude (Anthropic) ─────────────────────────────────────────────────
+        // Required headers: x-api-key, anthropic-version: 2023-06-01
         } else if (provider == "claude") {
             auto userMsg = matjson::Value::object();
             userMsg["role"]    = "user";
@@ -655,14 +798,39 @@ protected:
 
             requestBody                = matjson::Value::object();
             requestBody["model"]       = model;
-            requestBody["max_tokens"]  = 4096;
+            requestBody["max_tokens"]  = 8192;
             requestBody["temperature"] = 0.7;
             requestBody["system"]      = systemPrompt;
             requestBody["messages"]    = std::vector<matjson::Value>{userMsg};
 
             url = "https://api.anthropic.com/v1/messages";
 
+        // ── OpenAI ─────────────────────────────────────────────────────────────
+        // o-series models (o1-mini etc.) reject the "temperature" field.
         } else if (provider == "openai") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                          = matjson::Value::object();
+            requestBody["model"]                 = model;
+            requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_completion_tokens"] = 16384;
+            requestBody["max_tokens"]            = 16384;
+
+            if (!isOSeriesModel(model)) {
+                requestBody["temperature"] = 0.7;
+            }
+
+            url = "https://api.openai.com/v1/chat/completions";
+
+        // ── Mistral AI (Ministral) ─────────────────────────────────────────────
+        // OpenAI-compatible endpoint. Auth: Bearer token.
+        } else if (provider == "ministral") {
             auto sysMsg  = matjson::Value::object();
             sysMsg["role"]    = "system";
             sysMsg["content"] = systemPrompt;
@@ -674,23 +842,44 @@ protected:
             requestBody                = matjson::Value::object();
             requestBody["model"]       = model;
             requestBody["messages"]    = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_tokens"]  = 16384;
             requestBody["temperature"] = 0.7;
-            requestBody["max_tokens"]  = 4096;
 
-            url = "https://api.openai.com/v1/chat/completions";
+            url = "https://api.mistral.ai/v1/chat/completions";
 
+        // ── HuggingFace Inference API ──────────────────────────────────────────
+        // Uses the OpenAI-compatible /v1/chat/completions endpoint.
+        // Auth: Bearer token. Model is specified in the request body.
+        } else if (provider == "huggingface") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                = matjson::Value::object();
+            requestBody["model"]       = model;
+            requestBody["messages"]    = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_tokens"]  = 8192;
+            requestBody["temperature"] = 0.7;
+
+            url = "https://api-inference.huggingface.co/v1/chat/completions";
+
+        // ── Ollama ─────────────────────────────────────────────────────────────
         } else if (provider == "ollama") {
-            std::string ollamaUrl   = Mod::get()->getSettingValue<std::string>("ollama-url");
-            std::string ollamaModel = Mod::get()->getSettingValue<std::string>("ollama-model");
+            std::string ollamaUrl   = getOllamaUrl();
+            std::string ollamaModel = model; // already fetched via getProviderModel
 
             auto options = matjson::Value::object();
             options["temperature"] = 0.7;
 
-            requestBody           = matjson::Value::object();
-            requestBody["model"]  = ollamaModel;
-            requestBody["prompt"] = systemPrompt + "\n\n" + fullPrompt;
-            requestBody["stream"] = false;
-            requestBody["format"] = "json";
+            requestBody            = matjson::Value::object();
+            requestBody["model"]   = ollamaModel;
+            requestBody["prompt"]  = systemPrompt + "\n\n" + fullPrompt;
+            requestBody["stream"]  = false;
+            requestBody["format"]  = "json";
             requestBody["options"] = options;
 
             url = ollamaUrl + "/api/generate";
@@ -706,10 +895,9 @@ protected:
         if (provider == "claude") {
             request.header("x-api-key", apiKey);
             request.header("anthropic-version", "2023-06-01");
-        } else if (provider == "openai") {
+        } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
         } else if (provider == "ollama") {
-            // Fail fast if the local Ollama server is unreachable
             request.timeout(std::chrono::seconds(120));
         }
 
@@ -724,26 +912,9 @@ protected:
 
     // ── Generate button handler ───────────────────────────────────────────────
 
-    void onGenerate(CCObject*) {
-        std::string prompt = m_promptInput->getString();
-        if (prompt.empty() || prompt == "e.g. Medium difficulty platforming") {
-            FLAlertLayer::create("Empty Prompt", gd::string("Please enter a description!"), "OK")->show();
-            return;
-        }
-
-        std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
-        std::string apiKey   = Mod::get()->getSavedValue<std::string>("api-key", "");
-
-        if (apiKey.empty() && provider != "ollama") {
-            FLAlertLayer::create("API Key Required",
-                gd::string("Please click the lock icon to enter your API key!"), "OK")->show();
-            return;
-        }
-
+    void startGeneration(const std::string& prompt, const std::string& apiKey) {
         m_generateBtn->setEnabled(false);
 
-        // Loading circle fix: add it as a direct child of m_mainLayer, then call show(),
-        // then reposition to the popup centre so it doesn't appear at a screen corner.
         m_loadingCircle = LoadingCircle::create();
         m_loadingCircle->setParentLayer(m_mainLayer);
         m_loadingCircle->show();
@@ -753,6 +924,44 @@ protected:
         log::info("=== Generation Request === Prompt: {}", prompt);
 
         callAPI(prompt, apiKey);
+    }
+
+    void onGenerate(CCObject*) {
+        std::string prompt = m_promptInput->getString();
+        if (prompt.empty() || prompt == "e.g. Medium difficulty platforming") {
+            FLAlertLayer::create("Empty Prompt", gd::string("Please enter a description!"), "OK")->show();
+            return;
+        }
+
+        std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+        std::string apiKey   = getProviderApiKey(provider);
+
+        if (apiKey.empty() && provider != "ollama") {
+            FLAlertLayer::create("API Key Required",
+                gd::string(fmt::format(
+                    "Please open mod settings and enter your API key under the {} section.",
+                    provider == "gemini"      ? "Gemini"         :
+                    provider == "claude"      ? "Claude"         :
+                    provider == "openai"      ? "OpenAI"         :
+                    provider == "ministral"   ? "Ministral"      :
+                    provider == "huggingface" ? "HuggingFace"    : provider
+                )),
+                "OK")->show();
+            return;
+        }
+
+        if (m_shouldClearLevel) {
+            geode::createQuickPopup(
+                "Clear Level?",
+                "This will permanently delete ALL objects in your current level before generating.\n\nThis cannot be undone. Proceed?",
+                "Cancel", "Proceed",
+                [this, prompt, apiKey](FLAlertLayer*, bool btn2) {
+                    if (btn2) this->startGeneration(prompt, apiKey);
+                }
+            );
+        } else {
+            startGeneration(prompt, apiKey);
+        }
     }
 
     // ── API response handler ──────────────────────────────────────────────────
@@ -802,7 +1011,8 @@ protected:
                 if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
                 aiResponse = textResult.unwrap();
 
-            } else if (provider == "openai") {
+            // OpenAI, Mistral AI, and HuggingFace all use the same response format
+            } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
                 auto choices = json["choices"];
                 if (!choices.isArray() || choices.size() == 0) {
                     onError("No Response", "The AI didn't generate any content."); return;
@@ -852,17 +1062,6 @@ protected:
                 onError("No Objects", "The AI didn't generate any objects."); return;
             }
 
-            // Resolve "type" name → numeric GD object ID
-            for (size_t i = 0; i < objectsArray.size(); ++i) {
-                auto obj = objectsArray[i];
-                auto typeResult = obj["type"].asString();
-                if (typeResult) {
-                    auto& typeName = typeResult.unwrap();
-                    auto it = OBJECT_IDS.find(typeName);
-                    objectsArray[i]["id"] = (it != OBJECT_IDS.end()) ? it->second : 1;
-                }
-            }
-
             if (m_shouldClearLevel) clearLevel();
             prepareObjects(objectsArray);
 
@@ -898,15 +1097,14 @@ public:
 
 class $modify(AIEditorUI, EditorUI) {
     struct Fields {
-        CCMenuItemSpriteExtra* m_aiButton  = nullptr;
-        CCMenu*                m_aiMenu    = nullptr;
+        CCMenuItemSpriteExtra* m_aiButton    = nullptr;
+        CCMenu*                m_aiMenu      = nullptr;
         bool                   m_buttonAdded = false;
     };
 
     bool init(LevelEditorLayer* layer) {
         if (!EditorUI::init(layer)) return false;
 
-        // Delay by one frame so other mods finish their init first
         this->runAction(CCSequence::create(
             CCDelayTime::create(0.1f),
             CCCallFunc::create(this, callfunc_selector(AIEditorUI::addAIButton)),
@@ -929,8 +1127,6 @@ class $modify(AIEditorUI, EditorUI) {
 
         auto winSize = CCDirector::get()->getWinSize();
         m_fields->m_aiButton->setPosition({0, 0});
-
-        // Moved left relative to original (was -45) to avoid edge clipping
         m_fields->m_aiMenu->setPosition({winSize.width - 70, winSize.height - 30});
         m_fields->m_aiMenu->setZOrder(100);
         m_fields->m_aiMenu->setID("ai-generator-menu"_spr);
@@ -971,8 +1167,6 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
         }
     }
 
-    // Fix: restore the AI button when the player exits playtest mode.
-    // The original code hid it on onPlaytest but never showed it again on exit.
     void onStopPlaytest() {
         LevelEditorLayer::onStopPlaytest();
         if (auto editorUI = this->m_editorUI) {
@@ -990,6 +1184,18 @@ $execute {
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("Object library: {}", OBJECT_IDS.size() > 10 ? "local file" : "defaults (5 objects)");
+
+    std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+    std::string model    = getProviderModel(provider);
+    log::info("Provider: {} | Model: {}", provider, model);
+
+    if (provider == "ollama") {
+        bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
+        log::info("Ollama URL: {}", usePlatinum ? "Platinum cloud" : "localhost:11434");
+    }
+
+    log::info("Advanced features: {}",
+        Mod::get()->getSettingValue<bool>("enable-advanced-features") ? "ON" : "OFF");
     log::info("========================================");
 
     Loader::get()->queueInMainThread([] {
