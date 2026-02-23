@@ -628,7 +628,7 @@ protected:
                 // Clamp to a sane range (±32,767 units)
                 offsetX = std::clamp(offsetX, -32767.0f, 32767.0f);
                 offsetY = std::clamp(offsetY, -32767.0f, 32767.0f);
-                effectObj->m_moveOffset = {offsetX, offsetY};
+                effectObj->m_moveOffset = CCPoint(offsetX, offsetY);
 
                 // Duration
                 auto durResult = objData["duration"].asDouble();
