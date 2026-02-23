@@ -74,7 +74,7 @@
       "type": "string",
       "name": "Gemini Model",
       "description": "Google Gemini model to use when AI Provider is set to 'gemini'",
-      "default": "gemini-2.0-flash-latest",
+      "default": "gemini-flash-latest",
       "one-of": [
         "gemini-flash-latest",
         "gemini-pro-latest"
