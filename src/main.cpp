@@ -930,7 +930,7 @@ protected:
             requestBody["max_tokens"]  = 8192;
             requestBody["temperature"] = 0.7;
 
-            url = "https://api-inference.huggingface.co/v1/chat/completions";
+            url = "https://router.huggingface.co/v1/chat/completions";
 
         // ── Ollama ─────────────────────────────────────────────────────────────
         } else if (provider == "ollama") {
