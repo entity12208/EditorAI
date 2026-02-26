@@ -555,18 +555,16 @@ protected:
             //   "color": "#FF8800",           -- hex color to set it to
             //   "duration": 0.5,              -- transition time in seconds
             //   "blending": false,            -- (optional) additive blending
-            //   "opacity": 1.0               -- (optional) 0.0 – 1.0
+            //   "opacity": 1.0               -- (optional) 0.0 - 1.0
             // }
             if (advFeatures && gameObj->m_objectID == 899) {
                 auto* effectObj = static_cast<EffectGameObject*>(gameObj);
 
-                // Color channel (which GD color channel to modify, 1-999)
                 auto channelResult = objData["color_channel"].asInt();
                 if (channelResult) {
                     effectObj->m_targetColor = std::clamp((int)channelResult.unwrap(), 1, 999);
                 }
 
-                // Hex color "#RRGGBB"
                 auto colorHexResult = objData["color"].asString();
                 if (colorHexResult) {
                     GLubyte r = 255, g = 255, b = 255;
@@ -575,27 +573,23 @@ protected:
                     }
                 }
 
-                // Duration (seconds, 0 = instant)
                 auto durResult = objData["duration"].asDouble();
                 if (durResult) {
                     effectObj->m_duration = std::clamp(
                         static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
                 }
 
-                // Blending (additive color blend)
                 auto blendResult = objData["blending"].asBool();
                 if (blendResult) {
                     effectObj->m_usesBlending = blendResult.unwrap();
                 }
 
-                // Opacity (0.0 – 1.0)
                 auto opacityResult = objData["opacity"].asDouble();
                 if (opacityResult) {
                     effectObj->m_opacity = std::clamp(
                         static_cast<float>(opacityResult.unwrap()), 0.0f, 1.0f);
                 }
 
-                // Touch-triggered by default so it fires when the player reaches it
                 effectObj->m_isTouchTriggered = true;
             }
 
@@ -604,40 +598,34 @@ protected:
             // {
             //   "type": "move_trigger", "x": ..., "y": 0,
             //   "target_group": 1,       -- int 1-9999, group of objects to move
-            //   "move_x": 150,           -- horizontal offset in units (30 = 1 cell)
+            //   "move_x": 50,            -- horizontal offset in units (10 = 1 cell)
             //   "move_y": 0,             -- vertical offset in units
             //   "duration": 0.5,         -- transition time in seconds
-            //   "easing": 0             -- (optional) 0=None,1=EaseInOut,2=EaseIn,3=EaseOut,
-            //                           --   4=ElasticInOut,5=ElasticIn,6=ElasticOut,
-            //                           --   7=BounceInOut,8=BounceIn,9=BounceOut
+            //   "easing": 0             -- (optional) 0=None ... 9=BounceOut
             // }
             if (advFeatures && gameObj->m_objectID == 901) {
                 auto* effectObj = static_cast<EffectGameObject*>(gameObj);
 
-                // Which group to move
                 auto targetGroupResult = objData["target_group"].asInt();
                 if (targetGroupResult) {
                     effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
                 }
 
-                // X and Y movement offset (in GD units; 30 units = 1 grid cell)
+                // X and Y movement offset (in GD units; 10 units = 1 grid cell)
                 auto moveXResult = objData["move_x"].asDouble();
                 auto moveYResult = objData["move_y"].asDouble();
                 float offsetX = moveXResult ? static_cast<float>(moveXResult.unwrap()) : 0.0f;
                 float offsetY = moveYResult ? static_cast<float>(moveYResult.unwrap()) : 0.0f;
-                // Clamp to a sane range (±32,767 units)
                 offsetX = std::clamp(offsetX, -32767.0f, 32767.0f);
                 offsetY = std::clamp(offsetY, -32767.0f, 32767.0f);
                 effectObj->m_moveOffset = CCPoint(offsetX, offsetY);
 
-                // Duration
                 auto durResult = objData["duration"].asDouble();
                 if (durResult) {
                     effectObj->m_duration = std::clamp(
                         static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
                 }
 
-                // Easing type (integer 0–18, cast directly as the game does)
                 auto easingResult = objData["easing"].asInt();
                 if (easingResult) {
                     int easingVal = std::clamp((int)easingResult.unwrap(), 0, 18);
@@ -646,7 +634,6 @@ protected:
                     effectObj->m_easingType = EasingType::None;
                 }
 
-                // Touch-triggered so it fires when the player passes
                 effectObj->m_isTouchTriggered = true;
             }
 
@@ -667,12 +654,14 @@ protected:
 
         for (size_t i = 0; i < objectCount; ++i) {
             try {
-                auto objData = objectsArray[i];
-
-                // Resolve type name → numeric object ID
-                // "color_trigger" maps to ID 899 (GD color trigger)
-                // All other types look up OBJECT_IDS map
-                auto typeResult = objData["type"].asString();
+                // FIX: resolve type -> ID by writing directly into objectsArray[i],
+                // then read id/x/y back from objectsArray[i] — NOT from a local copy
+                // captured before the write. The old code captured `auto objData =
+                // objectsArray[i]` at the top of the loop, wrote the ID into
+                // objectsArray[i]["id"], then read `objData["id"]` from the stale
+                // copy that didn't have the ID yet — causing every object to be
+                // filtered out and logging "Prepared 0 valid objects".
+                auto typeResult = objectsArray[i]["type"].asString();
                 if (typeResult) {
                     const std::string& typeName = typeResult.unwrap();
                     if (typeName == "color_trigger") {
@@ -685,9 +674,10 @@ protected:
                     }
                 }
 
-                auto idResult = objData["id"].asInt();
-                auto xResult  = objData["x"].asDouble();
-                auto yResult  = objData["y"].asDouble();
+                // Read from the authoritative array slot (not a stale local copy)
+                auto idResult = objectsArray[i]["id"].asInt();
+                auto xResult  = objectsArray[i]["x"].asDouble();
+                auto yResult  = objectsArray[i]["y"].asDouble();
 
                 if (!idResult || !xResult || !yResult) continue;
 
@@ -695,21 +685,51 @@ protected:
                 float x        = static_cast<float>(xResult.unwrap());
                 float y        = static_cast<float>(yResult.unwrap());
 
-                // Clamp Y so objects are never placed underground
-                if (y < 0.0f) y = 0.0f;
-
                 if (objectID < 1 || objectID > 10000) {
                     log::warn("Invalid object ID {} at index {} — skipping", objectID, i);
                     continue;
                 }
 
-                m_deferredObjects.push_back({objectID, CCPoint{x, y}, objData});
+                // Capture the full slot (with id now set) for applyObjectProperties
+                m_deferredObjects.push_back({objectID, CCPoint{x, y}, objectsArray[i]});
             } catch (...) {
                 log::warn("Failed to prepare object at index {}", i);
             }
         }
 
+        // If any object sits below ground, shift the entire set upward so the
+        // lowest object lands exactly at Y=0. This preserves the relative layout
+        // instead of clamping each object individually (which would crush objects
+        // that were below ground onto the same floor level as each other).
+        if (!m_deferredObjects.empty()) {
+            float minY = m_deferredObjects[0].position.y;
+            for (auto& obj : m_deferredObjects)
+                minY = std::min(minY, obj.position.y);
+
+            if (minY < 0.0f) {
+                float shift = -minY;
+                log::info("Shifting all objects up by {:.1f} units (lowest was at Y={:.1f})", shift, minY);
+                for (auto& obj : m_deferredObjects)
+                    obj.position.y += shift;
+            }
+        }
+
         log::info("Prepared {} valid objects", m_deferredObjects.size());
+
+        // Only start the creation loop if there is actually something to create.
+        // If nothing was prepared, show an actionable error immediately instead
+        // of setting m_isCreatingObjects=true with an empty queue — which would
+        // cause the popup to freeze on "Starting object creation..." forever
+        // because updateObjectCreation early-returns on m_deferredObjects.empty().
+        if (m_deferredObjects.empty()) {
+            onError("No Valid Objects",
+                "The AI response contained no usable objects.\n\n"
+                "This can happen when the model uses unknown type names or omits "
+                "required fields (x, y). Try rephrasing your prompt or switching "
+                "to a more capable model.");
+            return;
+        }
+
         m_isCreatingObjects = true;
         showStatus("Starting object creation...", false);
     }
@@ -734,16 +754,27 @@ protected:
             "Available objects: {}\n\n"
             "JSON Format:\n"
             "{{\n"
-            "  \"analysis\": \"Brief reasoning\",\n"
+            "  \"analysis\": \"Brief reasoning about layout and design choices\",\n"
             "  \"objects\": [\n"
-            "    {{\"type\": \"block_black_gradient_square\", \"x\": 0, \"y\": 30}},\n"
-            "    {{\"type\": \"spike_black_gradient_spike\", \"x\": 150, \"y\": 0}}\n"
+            "    {{\"type\": \"block_black_gradient_square\", \"x\": 0, \"y\": 10}},\n"
+            "    {{\"type\": \"spike_black_gradient_spike\", \"x\": 50, \"y\": 0}}\n"
             "  ]\n"
             "}}\n\n"
-            "Coordinates: X=horizontal (30 units=1 grid cell), Y=vertical (0=ground, 30=1 block above ground).\n"
-            "Y must be >= 0. Never place objects below Y=0.\n"
-            "Spacing: EASY=150-200, MEDIUM=90-150, HARD=60-90, EXTREME=30-60 X units between obstacles.\n"
-            "Length: SHORT=500-1000, MEDIUM=1000-2000, LONG=2000-4000, XL=4000-8000, XXL=8000+ X units.",
+            "COORDINATE SYSTEM — read carefully:\n"
+            "  X = horizontal position. 10 units = 1 grid cell. Level runs left to right.\n"
+            "  Y = vertical position. 0 = ground. 10 = one block above ground. Y must always be >= 0.\n"
+            "  One grid cell is 10 units. A block sitting ON the ground has Y=0.\n"
+            "  A block one cell above ground has Y=10. Two cells above = Y=20.\n\n"
+            "OBSTACLE SPACING (X distance between obstacles):\n"
+            "  EASY=50-70  MEDIUM=30-50  HARD=20-30  EXTREME=10-20\n\n"
+            "LEVEL LENGTH (total X span):\n"
+            "  SHORT=200-400  MEDIUM=400-800  LONG=800-1600  XL=1600-3200  XXL=3200+\n\n"
+            "RULES:\n"
+            "  - Only use type names from the available objects list above. Never invent new names.\n"
+            "  - Y must be >= 0. Never place objects with negative Y.\n"
+            "  - Vary object types to create interesting, playable layouts.\n"
+            "  - A spike or hazard sitting on the ground has Y=0.\n"
+            "  - Platforms and blocks used as stepping stones should be at Y=10 or Y=20.",
             objectList
         );
 
@@ -753,40 +784,40 @@ protected:
                 "ADVANCED FEATURES (enabled):\n\n"
 
                 "JSON FORMAT RULES — follow exactly or the response will fail to parse:\n"
-                "  • Return ONLY the JSON object — no markdown, no comments, no trailing commas\n"
-                "  • All string values must use double quotes\n"
-                "  • Numbers must not be quoted: \"x\": 150 not \"x\": \"150\"\n"
-                "  • Arrays use square brackets: \"groups\": [1, 5]\n"
-                "  • Do not include fields with null values — omit them entirely\n\n"
+                "  * Return ONLY the JSON object — no markdown, no comments, no trailing commas\n"
+                "  * All string values must use double quotes\n"
+                "  * Numbers must not be quoted: \"x\": 50 not \"x\": \"50\"\n"
+                "  * Arrays use square brackets: \"groups\": [1, 5]\n"
+                "  * Do not include fields with null values — omit them entirely\n\n"
 
                 "1. GROUP IDs — Assign up to 10 group IDs per object with the optional \"groups\" array.\n"
                 "   Objects must be in a group for a move/toggle trigger to target them.\n"
-                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 30, \"groups\": [1]}\n\n"
+                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 10, \"groups\": [1]}\n\n"
 
                 "2. COLOR TRIGGERS (type \"color_trigger\", ID 899)\n"
                 "   Place at x positions where the color should change; set y to 0 (ground-level).\n"
                 "   They fire automatically when the player reaches them.\n"
                 "   Required fields:\n"
-                "     \"color_channel\": integer 1–999 — which GD channel to change\n"
+                "     \"color_channel\": integer 1-999 — which GD channel to change\n"
                 "       (1=Background, 2=Ground1, 3=Line, 4=Object, 1000=Player1, 1001=Player2)\n"
                 "     \"color\": \"#RRGGBB\" — target hex color (6 hex digits after #)\n"
                 "   Optional fields:\n"
                 "     \"duration\": float seconds (default 0.5)\n"
                 "     \"blending\": true/false — additive blend (default false)\n"
-                "     \"opacity\": 0.0–1.0 (default 1.0)\n"
-                "   Example: {\"type\":\"color_trigger\",\"x\":500,\"y\":0,\"color_channel\":1,\"color\":\"#FF4400\",\"duration\":1.0}\n\n"
+                "     \"opacity\": 0.0-1.0 (default 1.0)\n"
+                "   Example: {\"type\":\"color_trigger\",\"x\":170,\"y\":0,\"color_channel\":1,\"color\":\"#FF4400\",\"duration\":1.0}\n\n"
 
                 "3. MOVE TRIGGERS (type \"move_trigger\", ID 901)\n"
                 "   Move a group of objects by an offset over time. Objects must already have a\n"
                 "   matching group ID assigned via the \"groups\" field.\n"
                 "   Place the trigger at y=0 so the player activates it on the ground.\n"
                 "   Required fields:\n"
-                "     \"target_group\": integer 1–9999 — group ID to move (must match object groups)\n"
-                "     \"move_x\": float — horizontal distance in GD units (30 = 1 grid cell, negative = left)\n"
+                "     \"target_group\": integer 1-9999 — group ID to move (must match object groups)\n"
+                "     \"move_x\": float — horizontal distance in GD units (10 = 1 grid cell, negative = left)\n"
                 "     \"move_y\": float — vertical distance in GD units (positive = up)\n"
                 "   Optional fields:\n"
                 "     \"duration\": float seconds (default 0.5)\n"
-                "     \"easing\": integer 0–9\n"
+                "     \"easing\": integer 0-9\n"
                 "       0=None, 1=EaseInOut, 2=EaseIn, 3=EaseOut,\n"
                 "       4=ElasticInOut, 5=ElasticIn, 6=ElasticOut,\n"
                 "       7=BounceInOut, 8=BounceIn, 9=BounceOut\n"
@@ -794,8 +825,8 @@ protected:
                 "   where the player will reach it, and place the objects being moved wherever they\n"
                 "   should start (they will shift by move_x/move_y when the trigger fires).\n"
                 "   Example:\n"
-                "     Objects to move:    {\"type\":\"block_black_gradient_square\",\"x\":800,\"y\":90,\"groups\":[2]}\n"
-                "     Trigger to fire it: {\"type\":\"move_trigger\",\"x\":500,\"y\":0,\"target_group\":2,\"move_x\":0,\"move_y\":90,\"duration\":0.5,\"easing\":1}\n\n"
+                "     Objects to move:    {\"type\":\"block_black_gradient_square\",\"x\":270,\"y\":30,\"groups\":[2]}\n"
+                "     Trigger to fire it: {\"type\":\"move_trigger\",\"x\":170,\"y\":0,\"target_group\":2,\"move_x\":0,\"move_y\":30,\"duration\":0.5,\"easing\":1}\n\n"
 
                 "Use advanced features purposefully to enhance the level. Color triggers set the mood\n"
                 "at natural section changes (drops, transitions). Move triggers add dynamic platforming\n"
@@ -1087,13 +1118,23 @@ protected:
                 aiResponse = textResult.unwrap();
 
             } else if (provider == "ollama") {
+                // FIX: treat an incomplete response (done=false) as a hard error.
+                // Previously this only logged a warning and continued trying to parse
+                // the truncated JSON, which always failed with "Failed to parse level
+                // data." — confusing users into thinking the mod was broken rather
+                // than the model running out of context window.
+                auto doneResult = json["done"].asBool();
+                if (doneResult && !doneResult.unwrap()) {
+                    onError("Incomplete Response",
+                        "Ollama stopped generating before the level was complete.\n\n"
+                        "Try requesting a shorter level, reducing the max-objects setting, "
+                        "or using a model with a larger context window (e.g. llama3.1:8b or mistral:7b).");
+                    return;
+                }
+
                 auto responseResult = json["response"].asString();
                 if (!responseResult) { onError("Invalid Response", "Failed to extract Ollama response."); return; }
                 aiResponse = responseResult.unwrap();
-
-                auto doneResult = json["done"].asBool();
-                if (doneResult && !doneResult.unwrap())
-                    log::warn("Ollama response marked as incomplete");
             }
 
             // Strip markdown code fences if present
@@ -1245,7 +1286,7 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("         Editor AI v2.1.5");
+    log::info("         Editor AI v2.1.6");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("Object library: {}", OBJECT_IDS.size() > 10 ? "local file" : "defaults (5 objects)");
