@@ -76,8 +76,8 @@
       "description": "Google Gemini model to use when AI Provider is set to 'gemini'",
       "default": "gemini-flash-latest",
       "one-of": [
-        "gemini-flash-latest",
-        "gemini-pro-latest"
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
       ]
     },
     "gemini-api-key": {
@@ -119,8 +119,7 @@
       "default": "gpt-4o",
       "one-of": [
         "gpt-4o",
-        "gpt-4.1-mini",
-        "o1-mini"
+        "gpt-4.1-mini"
       ]
     },
     "openai-api-key": {
