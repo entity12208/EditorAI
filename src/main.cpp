@@ -7,6 +7,8 @@
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 #include <Geode/ui/TextInput.hpp>
+// NodeIDs utilities: NodeIDs::provideFor, switchToMenu, etc.
+#include <Geode/utils/NodeIDs.hpp>
 
 using namespace geode::prelude;
 
@@ -121,13 +123,17 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
         if (!json) return {title, message};
         auto error = json.unwrap();
         std::string errorMsg;
+        std::string errorStatus; // Google APIs include a "status" string e.g. "PERMISSION_DENIED"
 
-        // Standard format: {"error": {"message": "..."}}  (OpenAI, Claude, Mistral)
+        // Standard format: {"error": {"message": "...", "status": "..."}}  (OpenAI, Claude, Mistral, Gemini)
         if (error.contains("error")) {
             auto errorObj = error["error"];
-            if (errorObj.isObject() && errorObj.contains("message")) {
+            if (errorObj.isObject()) {
                 auto msgResult = errorObj["message"].asString();
                 if (msgResult) errorMsg = msgResult.unwrap();
+                // Google-specific: machine-readable status code in error.status
+                auto statusResult = errorObj["status"].asString();
+                if (statusResult) errorStatus = statusResult.unwrap();
             } else {
                 // HuggingFace format: {"error": "message string"}
                 auto directMsg = errorObj.asString();
@@ -135,21 +141,76 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
             }
         }
 
-        if (statusCode == 401 || statusCode == 403) {
+        // Returns true if the error message/status indicates a bad API key specifically
+        // (as opposed to a quota, billing, or permission issue unrelated to key validity).
+        auto isKeyError = [&]() {
+            return errorMsg.find("API key") != std::string::npos
+                || errorMsg.find("api key") != std::string::npos
+                || errorMsg.find("API_KEY") != std::string::npos
+                || errorStatus == "API_KEY_INVALID"
+                || errorMsg.find("invalid key") != std::string::npos
+                || errorMsg.find("authentication") != std::string::npos
+                || errorMsg.find("Unauthorized") != std::string::npos;
+        };
+
+        if (statusCode == 401) {
+            // 401 = Unauthorized — definitively a bad/missing API key
             title   = "Invalid API Key";
-            message = "Your API key is invalid or expired.\n\nPlease check your API key in mod settings and try again.";
+            message = "Your API key was rejected (HTTP 401).\n\nPlease check your API key in mod settings and try again.";
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+
+        } else if (statusCode == 403) {
+            // 403 = Forbidden — could be a bad key, BUT more commonly means the key
+            // is valid but doesn't have access to this resource. Common causes:
+            //   - Model requires a paid tier / billing not enabled
+            //   - Free-tier quota exhausted for this model
+            //   - API not enabled in Google Cloud Console
+            //   - IP or referrer restriction on the key
+            if (isKeyError()) {
+                title   = "Invalid API Key";
+                message = "Your API key does not have permission to access this API.\n\nPlease check your API key in mod settings.";
+            } else {
+                title   = "Access Denied (HTTP 403)";
+                message = "The service denied the request. This is usually NOT a bad key.\n\n"
+                          "Common causes:\n"
+                          "- This model requires a paid plan or billing enabled\n"
+                          "- Your free-tier quota for this model is exhausted\n"
+                          "- The API is not enabled in your provider dashboard\n\n"
+                          "Check your account limits at the provider's dashboard.";
+            }
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+
+        } else if (statusCode == 404) {
+            // 404 = Not Found — usually an invalid model name
+            title   = "Model Not Found";
+            message = "The specified model was not found (HTTP 404).\n\nPlease check your model setting.";
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+
         } else if (statusCode == 429) {
             title   = "Rate Limit Exceeded";
             message = (errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos)
                 ? "You've exceeded your API quota.\n\nPlease wait or upgrade your plan."
                 : "Too many requests.\n\nPlease wait a moment and try again.";
+
         } else if (statusCode == 400) {
-            title   = "Invalid Request";
-            message = errorMsg.find("model") != std::string::npos
-                ? "The selected model is invalid.\n\nPlease check your model setting."
-                : "The request was invalid.\n\nPlease check your settings and try again.";
-            if (!errorMsg.empty())
-                message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            // 400 = Bad Request — Gemini returns this for invalid API keys
+            // (INVALID_ARGUMENT), so we need to distinguish key errors from
+            // other malformed-request errors.
+            if (isKeyError()) {
+                title   = "Invalid API Key";
+                message = "Your API key was rejected by the service.\n\nPlease check your API key in mod settings.";
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            } else if (errorMsg.find("model") != std::string::npos
+                    || errorStatus == "NOT_FOUND") {
+                title   = "Invalid Model";
+                message = "The selected model is invalid or not supported.\n\nPlease check your model setting.";
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            } else {
+                title   = "Invalid Request";
+                message = "The request was rejected by the service.";
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            }
+
         } else if (statusCode >= 500) {
             title   = "Service Error";
             message = "The AI service is currently unavailable.\n\nPlease try again later.";
@@ -839,7 +900,19 @@ protected:
 
     // ── API call ──────────────────────────────────────────────────────────────
 
-    void callAPI(const std::string& prompt, const std::string& apiKey) {
+    // Strips leading/trailing ASCII whitespace (spaces, tabs, newlines, carriage
+    // returns). API keys are frequently copy-pasted with invisible trailing
+    // characters that cause 401/403 responses even when the key is valid.
+    static std::string trimKey(std::string s) {
+        const std::string ws = " \t\r\n";
+        size_t start = s.find_first_not_of(ws);
+        if (start == std::string::npos) return "";
+        size_t end = s.find_last_not_of(ws);
+        return s.substr(start, end - start + 1);
+    }
+
+    void callAPI(const std::string& prompt, const std::string& rawApiKey) {
+        std::string apiKey = trimKey(rawApiKey);
         std::string provider   = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model      = getProviderModel(provider);
         std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
@@ -863,26 +936,45 @@ protected:
         std::string    url;
 
         // ── Gemini ─────────────────────────────────────────────────────────────
+        // Auth: API key passed as ?key= URL parameter (official REST API style).
+        // system_instruction: dedicated top-level body field (snake_case), separate
+        //   from user contents. Mixing them into one user message confuses the model
+        //   and wastes tokens on the instruction side of the context window.
         if (provider == "gemini") {
-            auto textPart = matjson::Value::object();
-            textPart["text"] = systemPrompt + "\n\n" + fullPrompt;
+            // systemInstruction — separate from user content, as required by the Gemini REST API.
+            // IMPORTANT: "parts" must be an ARRAY even when there is only one part.
+            // Sending a plain object here causes a 400 "Invalid JSON payload" error.
+            auto sysInstructPart = matjson::Value::object();
+            sysInstructPart["text"] = systemPrompt;
+            auto sysInstruct = matjson::Value::object();
+            sysInstruct["parts"] = std::vector<matjson::Value>{sysInstructPart};
 
-            std::vector<matjson::Value> parts = {textPart};
+            // User message — contains only the actual generation request
+            auto userPart = matjson::Value::object();
+            userPart["text"] = fullPrompt;
             auto message = matjson::Value::object();
             message["role"]  = "user";
-            message["parts"] = parts;
+            message["parts"] = std::vector<matjson::Value>{userPart};
+
+            // Disable thinking to allow temperature < 1.0 and reduce token usage.
+            // Gemini 2.5 models enable thinking by default; with thinking active the
+            // minimum allowed temperature is 1.0 and responses are much slower/costlier.
+            auto thinkingConfig = matjson::Value::object();
+            thinkingConfig["thinkingBudget"] = 0;
 
             auto genConfig = matjson::Value::object();
             genConfig["temperature"]     = 0.7;
             genConfig["maxOutputTokens"] = 65536;
+            genConfig["thinkingConfig"]  = thinkingConfig;
 
-            requestBody                     = matjson::Value::object();
-            requestBody["contents"]         = std::vector<matjson::Value>{message};
-            requestBody["generationConfig"] = genConfig;
+            requestBody                      = matjson::Value::object();
+            requestBody["systemInstruction"] = sysInstruct;
+            requestBody["contents"]          = std::vector<matjson::Value>{message};
+            requestBody["generationConfig"]  = genConfig;
 
             url = fmt::format(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                model, apiKey
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                model
             );
 
         // ── Claude (Anthropic) ─────────────────────────────────────────────────
@@ -988,7 +1080,12 @@ protected:
         auto request = web::WebRequest();
         request.header("Content-Type", "application/json");
 
-        if (provider == "claude") {
+        if (provider == "gemini") {
+            // Gemini authenticates via the x-goog-api-key header.
+            // Google's official docs require the header approach for all new models;
+            // the old ?key= URL parameter is no longer accepted by gemini-2.5-*.
+            request.header("x-goog-api-key", apiKey);
+        } else if (provider == "claude") {
             request.header("x-api-key", apiKey);
             request.header("anthropic-version", "2023-06-01");
         } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
@@ -1090,10 +1187,50 @@ protected:
             std::string aiResponse;
 
             if (provider == "gemini") {
+                // Check if the entire request was blocked before generation started.
+                // This happens when the prompt itself triggers a safety filter.
+                if (json.contains("promptFeedback")) {
+                    auto blockReasonResult = json["promptFeedback"]["blockReason"].asString();
+                    if (blockReasonResult) {
+                        const std::string& reason = blockReasonResult.unwrap();
+                        if (!reason.empty() && reason != "BLOCK_REASON_UNSPECIFIED") {
+                            onError("Prompt Blocked",
+                                fmt::format("Gemini blocked the request before generating.\n\nReason: {}\n\n"
+                                    "Try rephrasing your prompt.", reason));
+                            return;
+                        }
+                    }
+                }
+
                 auto candidates = json["candidates"];
                 if (!candidates.isArray() || candidates.size() == 0) {
                     onError("No Response", "The AI didn't generate any content."); return;
                 }
+
+                // Check why generation stopped. SAFETY and RECITATION mean the response
+                // was filtered — the text field will be empty or absent in those cases.
+                auto finishReasonResult = candidates[0]["finishReason"].asString();
+                if (finishReasonResult) {
+                    const std::string& finishReason = finishReasonResult.unwrap();
+                    if (finishReason == "SAFETY") {
+                        onError("Response Blocked",
+                            "Gemini's safety filter blocked the generated level.\n\n"
+                            "Try rephrasing your prompt or using different difficulty/style settings.");
+                        return;
+                    }
+                    if (finishReason == "RECITATION") {
+                        onError("Response Blocked",
+                            "Gemini blocked the response due to recitation policy.\n\n"
+                            "Try rephrasing your prompt.");
+                        return;
+                    }
+                    // MAX_TOKENS means the response was cut off — still try to parse
+                    // what we got, but log a warning
+                    if (finishReason == "MAX_TOKENS") {
+                        log::warn("Gemini hit max token limit — response may be truncated");
+                    }
+                }
+
                 auto textResult = candidates[0]["content"]["parts"][0]["text"].asString();
                 if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
                 aiResponse = textResult.unwrap();
@@ -1199,18 +1336,55 @@ public:
     }
 };
 
-// ─── EditorUI hook — adds the AI button ──────────────────────────────────────
+// ─── EditorUI hook — mounts AI button onto the NodeIDs "undo-menu" ───────────
+//
+// How geode.node-ids works
+// ────────────────────────
+// NodeIDs is a required dependency that runs low-priority hooks on many GD
+// layers and assigns stable string IDs to their child nodes. Once those hooks
+// have fired, any child can be fetched with  node->getChildByID("some-id")
+// instead of a raw child index that breaks whenever the tree changes.
+//
+// For EditorUI specifically, NodeIDs assigns an ID of "undo-menu" to the
+// CCMenu that holds the undo/redo buttons in the top-left of the editor.
+//
+// All NodeIDs hooks run at a very low priority, so they fire before ours.
+// Still, calling NodeIDs::provideFor(this) at the top of init() is the
+// recommended defensive pattern — it's a no-op if IDs are already present,
+// and guarantees correctness in edge cases (e.g. load order surprises).
+//
+// After adding our button we must call undoMenu->updateLayout() so that the
+// AxisLayout NodeIDs placed on undo-menu reflowed to include the new child.
+//
+// Visibility management
+// ─────────────────────
+// The button now lives inside undo-menu, so there is no separate CCMenu to
+// show/hide. The playtest and pause-resume hooks look up the button by its
+// mod-prefixed ID ("entity12208.edit-ai/ai-button") directly inside undo-menu.
+
+// Helper: find the AI button regardless of which menu it's in.
+// Returns nullptr if geode.node-ids hasn't run or the node was removed.
+static CCNode* getAIButton(EditorUI* ui) {
+    if (!ui) return nullptr;
+    auto undoMenu = ui->getChildByID("undo-menu");
+    if (!undoMenu) return nullptr;
+    return undoMenu->getChildByID("ai-button"_spr);
+}
 
 class $modify(AIEditorUI, EditorUI) {
     struct Fields {
-        CCMenuItemSpriteExtra* m_aiButton    = nullptr;
-        CCMenu*                m_aiMenu      = nullptr;
-        bool                   m_buttonAdded = false;
+        bool m_buttonAdded = false;
     };
 
     bool init(LevelEditorLayer* layer) {
         if (!EditorUI::init(layer)) return false;
 
+        // Ensure NodeIDs has assigned IDs before we look anything up.
+        // This is a no-op if the low-priority NodeIDs hook already ran.
+        NodeIDs::provideFor(this);
+
+        // Schedule one frame out as a belt-and-suspenders measure. In practice
+        // provideFor above is sufficient; the delay costs nothing.
         this->runAction(CCSequence::create(
             CCDelayTime::create(0.1f),
             CCCallFunc::create(this, callfunc_selector(AIEditorUI::addAIButton)),
@@ -1221,24 +1395,39 @@ class $modify(AIEditorUI, EditorUI) {
 
     void addAIButton() {
         if (m_fields->m_buttonAdded) return;
+
+        // Locate the undo-menu assigned by geode.node-ids.
+        auto undoMenu = this->getChildByID("undo-menu");
+        if (!undoMenu) {
+            log::error("EditorAI: 'undo-menu' not found — geode.node-ids may not have run");
+            return;
+        }
+
         m_fields->m_buttonAdded = true;
 
-        m_fields->m_aiButton = CCMenuItemSpriteExtra::create(
+        auto aiButton = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("AI", "goldFont.fnt", "GJ_button_04.png", 0.8f),
             this, menu_selector(AIEditorUI::onAIButton)
         );
+        // Prefix the ID with the mod ID as required by Geode best practices.
+        aiButton->setID("ai-button"_spr);
 
-        m_fields->m_aiMenu = CCMenu::create();
-        m_fields->m_aiMenu->addChild(m_fields->m_aiButton);
+        undoMenu->addChild(aiButton);
 
-        auto winSize = CCDirector::get()->getWinSize();
-        m_fields->m_aiButton->setPosition({0, 0});
-        m_fields->m_aiMenu->setPosition({winSize.width - 70, winSize.height - 30});
-        m_fields->m_aiMenu->setZOrder(100);
-        m_fields->m_aiMenu->setID("ai-generator-menu"_spr);
+        // undo-menu uses RowLayout (AxisAlignment::Start, gap 10.f) with a
+        // fixed content size set by NodeIDs (winSize.width/2 - 90.f wide).
+        // On a 480px screen that's only ~150px — barely enough for the three
+        // stock buttons. Widen the content by one button-slot so our button
+        // isn't clipped by the layout engine. We compute the button width from
+        // the node's own content size (available after create()) plus the gap.
+        auto currentSize = undoMenu->getContentSize();
+        auto buttonSlot  = aiButton->getContentSize().width + 10.f; // 10.f = undo-menu gap
+        undoMenu->setContentSize({ currentSize.width + buttonSlot, currentSize.height });
 
-        this->addChild(m_fields->m_aiMenu);
-        log::info("AI button added to editor");
+        // Tell the AxisLayout to re-flow all children with the new content size.
+        undoMenu->updateLayout();
+
+        log::info("EditorAI: AI button mounted on undo-menu");
     }
 
     void onAIButton(CCObject*) {
@@ -1250,14 +1439,14 @@ class $modify(AIEditorUI, EditorUI) {
     }
 };
 
-// ─── EditorPauseLayer hook — restore button on resume ────────────────────────
+// ─── EditorPauseLayer hook — restore button visibility on resume ──────────────
 
 class $modify(EditorPauseLayer) {
     void onResume(CCObject* sender) {
         EditorPauseLayer::onResume(sender);
         if (auto editorUI = m_editorLayer->m_editorUI) {
-            if (auto menu = typeinfo_cast<CCMenu*>(editorUI->getChildByID("ai-generator-menu"_spr)))
-                menu->setVisible(true);
+            if (auto btn = getAIButton(editorUI))
+                btn->setVisible(true);
         }
     }
 };
@@ -1268,16 +1457,16 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
     void onPlaytest() {
         LevelEditorLayer::onPlaytest();
         if (auto editorUI = this->m_editorUI) {
-            if (auto menu = typeinfo_cast<CCMenu*>(editorUI->getChildByID("ai-generator-menu"_spr)))
-                menu->setVisible(false);
+            if (auto btn = getAIButton(editorUI))
+                btn->setVisible(false);
         }
     }
 
     void onStopPlaytest() {
         LevelEditorLayer::onStopPlaytest();
         if (auto editorUI = this->m_editorUI) {
-            if (auto menu = typeinfo_cast<CCMenu*>(editorUI->getChildByID("ai-generator-menu"_spr)))
-                menu->setVisible(true);
+            if (auto btn = getAIButton(editorUI))
+                btn->setVisible(true);
         }
     }
 };
@@ -1286,7 +1475,7 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("         Editor AI v2.1.6");
+    log::info("         Editor AI v2.1.5");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("Object library: {}", OBJECT_IDS.size() > 10 ? "local file" : "defaults (5 objects)");
