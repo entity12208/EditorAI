@@ -1066,7 +1066,7 @@ protected:
             requestBody            = matjson::Value::object();
             requestBody["model"]   = ollamaModel;
             requestBody["prompt"]  = systemPrompt + "\n\n" + fullPrompt;
-            requestBody["stream"]  = false;
+            requestBody["stream"]  = true;
             requestBody["format"]  = "json";
             requestBody["options"] = options;
 
