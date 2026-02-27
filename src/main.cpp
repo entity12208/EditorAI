@@ -1273,7 +1273,10 @@ protected:
                 if (!responseResult) { onError("Invalid Response", "Failed to extract Ollama response."); return; }
                 aiResponse = responseResult.unwrap();
             }
-
+            
+            // Log the full raw response
+            log::info("=== Full AI Response from {} ===\n{}\n=== End Response ===", provider, aiResponse);
+            
             // Strip markdown code fences if present
             size_t codeBlockStart = aiResponse.find("```");
             while (codeBlockStart != std::string::npos) {
