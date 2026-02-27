@@ -14,6 +14,12 @@
   "dependencies": {
     "geode.node-ids": ">=v1.0.0"
   },
+  "incompatibilities": {
+    "alk.editor-collab": {
+      "breaking": true,
+      "version": "*"
+    }
+  },
   "settings": {
 
     "ai-provider": {
@@ -74,7 +80,7 @@
       "type": "string",
       "name": "Gemini Model",
       "description": "Google Gemini model to use when AI Provider is set to 'gemini'",
-      "default": "gemini-flash-latest",
+      "default": "gemini-2.5-flash",
       "one-of": [
         "gemini-2.5-flash",
         "gemini-2.5-pro"
