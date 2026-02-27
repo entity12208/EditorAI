@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <sstream>
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -11,6 +12,23 @@
 #include <Geode/utils/NodeIDs.hpp>
 
 using namespace geode::prelude;
+
+// ─── Logging helper — prevents Geode's spdlog from silently truncating long
+//     strings. Splits anything over 1800 characters into numbered chunks.
+// ─────────────────────────────────────────────────────────────────────────────
+static void logLong(const std::string& label, const std::string& content) {
+    constexpr size_t CHUNK = 1800;
+    if (content.size() <= CHUNK) {
+        log::info("{}: {}", label, content);
+        return;
+    }
+    size_t total = (content.size() + CHUNK - 1) / CHUNK;
+    log::info("{} ({} chars, {} parts):", label, content.size(), total);
+    for (size_t i = 0; i < content.size(); i += CHUNK) {
+        size_t part = i / CHUNK + 1;
+        log::info("[{}/{}] {}", part, total, content.substr(i, CHUNK));
+    }
+}
 
 // ─── Object ID registry ──────────────────────────────────────────────────────
 
@@ -260,7 +278,7 @@ struct DeferredObject {
 
 // ─── Main generation popup ────────────────────────────────────────────────────
 
-class AIGeneratorPopup : public Popup {
+class AIGeneratorPopup : public Popup<> {
 protected:
     TextInput*               m_promptInput    = nullptr;
     CCLabelBMFont*           m_statusLabel    = nullptr;
@@ -282,7 +300,7 @@ protected:
     // ── init ──────────────────────────────────────────────────────────────────
 
     bool init(LevelEditorLayer* editorLayer) {
-        if (!Popup::init(420.f, 300.f))
+        if (!Popup<>::init(420.f, 300.f))
             return false;
 
         m_editorLayer = editorLayer;
@@ -434,6 +452,7 @@ protected:
 
     // Serialize the current editor objects to compact JSON so the AI can see what
     // is already in the level. Capped at 300 objects to keep the prompt manageable.
+    // NOTE: Only called when m_shouldClearLevel is false (building on top of existing).
     std::string buildLevelDataJson() {
         if (!m_editorLayer || !m_editorLayer->m_objects)
             return "{\"object_count\":0,\"objects\":[]}";
@@ -588,9 +607,6 @@ protected:
                 gameObj->setScaleY(-gameObj->getScaleY());
 
             // ── Group IDs (advanced features) ─────────────────────────────────
-            // AI can assign up to 10 group IDs per object using:
-            //   "groups": [1, 5, 12]
-            // Groups enable triggers to target specific objects.
             if (advFeatures && objData.contains("groups") && objData["groups"].isArray()) {
                 auto& groupsArr = objData["groups"];
                 int assigned = 0;
@@ -609,15 +625,6 @@ protected:
             }
 
             // ── Color Trigger properties (advanced features, ID 899) ───────────
-            // AI specifies color triggers as:
-            // {
-            //   "type": "color_trigger", "x": ..., "y": 0,
-            //   "color_channel": 1,          -- int 1-999, which channel to change
-            //   "color": "#FF8800",           -- hex color to set it to
-            //   "duration": 0.5,              -- transition time in seconds
-            //   "blending": false,            -- (optional) additive blending
-            //   "opacity": 1.0               -- (optional) 0.0 - 1.0
-            // }
             if (advFeatures && gameObj->m_objectID == 899) {
                 auto* effectObj = static_cast<EffectGameObject*>(gameObj);
 
@@ -655,15 +662,6 @@ protected:
             }
 
             // ── Move Trigger properties (advanced features, ID 901) ────────────
-            // AI specifies move triggers as:
-            // {
-            //   "type": "move_trigger", "x": ..., "y": 0,
-            //   "target_group": 1,       -- int 1-9999, group of objects to move
-            //   "move_x": 50,            -- horizontal offset in units (10 = 1 cell)
-            //   "move_y": 0,             -- vertical offset in units
-            //   "duration": 0.5,         -- transition time in seconds
-            //   "easing": 0             -- (optional) 0=None ... 9=BounceOut
-            // }
             if (advFeatures && gameObj->m_objectID == 901) {
                 auto* effectObj = static_cast<EffectGameObject*>(gameObj);
 
@@ -672,7 +670,6 @@ protected:
                     effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
                 }
 
-                // X and Y movement offset (in GD units; 10 units = 1 grid cell)
                 auto moveXResult = objData["move_x"].asDouble();
                 auto moveYResult = objData["move_y"].asDouble();
                 float offsetX = moveXResult ? static_cast<float>(moveXResult.unwrap()) : 0.0f;
@@ -717,11 +714,8 @@ protected:
             try {
                 // FIX: resolve type -> ID by writing directly into objectsArray[i],
                 // then read id/x/y back from objectsArray[i] — NOT from a local copy
-                // captured before the write. The old code captured `auto objData =
-                // objectsArray[i]` at the top of the loop, wrote the ID into
-                // objectsArray[i]["id"], then read `objData["id"]` from the stale
-                // copy that didn't have the ID yet — causing every object to be
-                // filtered out and logging "Prepared 0 valid objects".
+                // captured before the write (that was the original bug causing
+                // "Prepared 0 valid objects" since objData never had the id field).
                 auto typeResult = objectsArray[i]["type"].asString();
                 if (typeResult) {
                     const std::string& typeName = typeResult.unwrap();
@@ -759,9 +753,8 @@ protected:
         }
 
         // If any object sits below ground, shift the entire set upward so the
-        // lowest object lands exactly at Y=0. This preserves the relative layout
-        // instead of clamping each object individually (which would crush objects
-        // that were below ground onto the same floor level as each other).
+        // lowest object lands exactly at Y=0. Preserves relative layout instead
+        // of clamping each object individually (which would crush structures).
         if (!m_deferredObjects.empty()) {
             float minY = m_deferredObjects[0].position.y;
             for (auto& obj : m_deferredObjects)
@@ -777,11 +770,6 @@ protected:
 
         log::info("Prepared {} valid objects", m_deferredObjects.size());
 
-        // Only start the creation loop if there is actually something to create.
-        // If nothing was prepared, show an actionable error immediately instead
-        // of setting m_isCreatingObjects=true with an empty queue — which would
-        // cause the popup to freeze on "Starting object creation..." forever
-        // because updateObjectCreation early-returns on m_deferredObjects.empty().
         if (m_deferredObjects.empty()) {
             onError("No Valid Objects",
                 "The AI response contained no usable objects.\n\n"
@@ -912,7 +900,7 @@ protected:
     }
 
     void callAPI(const std::string& prompt, const std::string& rawApiKey) {
-        std::string apiKey = trimKey(rawApiKey);
+        std::string apiKey     = trimKey(rawApiKey);
         std::string provider   = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string model      = getProviderModel(provider);
         std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
@@ -922,43 +910,56 @@ protected:
         log::info("Calling {} API with model: {}", provider, model);
 
         std::string systemPrompt = buildSystemPrompt();
-        std::string levelData    = buildLevelDataJson();
+
+        // ── Level data context ────────────────────────────────────────────────
+        // When the user is NOT clearing the level, we pass the existing objects
+        // to the AI so it can build on top of them and avoid collisions.
+        // When clear level is ON, there is no useful context to send.
+        // The full level JSON is also logged here for debugging.
+        std::string levelDataSection;
+        if (!m_shouldClearLevel) {
+            std::string levelJson = buildLevelDataJson();
+            log::info("=== Current Level Data (sent to AI as context) ===");
+            logLong("LevelData", levelJson);
+            log::info("=== End Level Data ===");
+            levelDataSection = "\n\nCurrent level data (build upon or extend these existing objects):\n" + levelJson;
+        } else {
+            log::info("Clear level is ON — not sending existing level data to AI");
+        }
 
         std::string fullPrompt = fmt::format(
             "Generate a Geometry Dash level:\n\n"
-            "Request: {}\nDifficulty: {}\nStyle: {}\nLength: {}\n\n"
-            "Current level data (you may build upon or extend these existing objects): {}\n\n"
+            "Request: {}\nDifficulty: {}\nStyle: {}\nLength: {}{}\n\n"
             "Return JSON with analysis and objects array.",
-            prompt, difficulty, style, length, levelData
+            prompt, difficulty, style, length, levelDataSection
         );
+
+        // Log the full system prompt and user prompt before sending
+        log::info("=== System Prompt ===");
+        logLong("SysPrompt", systemPrompt);
+        log::info("=== End System Prompt ===");
+        log::info("=== User Prompt ===");
+        logLong("UserPrompt", fullPrompt);
+        log::info("=== End User Prompt ===");
 
         matjson::Value requestBody;
         std::string    url;
 
         // ── Gemini ─────────────────────────────────────────────────────────────
-        // Auth: API key passed as ?key= URL parameter (official REST API style).
-        // system_instruction: dedicated top-level body field (snake_case), separate
-        //   from user contents. Mixing them into one user message confuses the model
-        //   and wastes tokens on the instruction side of the context window.
         if (provider == "gemini") {
-            // systemInstruction — separate from user content, as required by the Gemini REST API.
-            // IMPORTANT: "parts" must be an ARRAY even when there is only one part.
-            // Sending a plain object here causes a 400 "Invalid JSON payload" error.
+            // system_instruction: dedicated top-level body field, parts must be an ARRAY.
             auto sysInstructPart = matjson::Value::object();
             sysInstructPart["text"] = systemPrompt;
             auto sysInstruct = matjson::Value::object();
             sysInstruct["parts"] = std::vector<matjson::Value>{sysInstructPart};
 
-            // User message — contains only the actual generation request
             auto userPart = matjson::Value::object();
             userPart["text"] = fullPrompt;
             auto message = matjson::Value::object();
             message["role"]  = "user";
             message["parts"] = std::vector<matjson::Value>{userPart};
 
-            // Disable thinking to allow temperature < 1.0 and reduce token usage.
-            // Gemini 2.5 models enable thinking by default; with thinking active the
-            // minimum allowed temperature is 1.0 and responses are much slower/costlier.
+            // Disable thinking budget to allow temperature < 1.0 and reduce latency.
             auto thinkingConfig = matjson::Value::object();
             thinkingConfig["thinkingBudget"] = 0;
 
@@ -978,7 +979,6 @@ protected:
             );
 
         // ── Claude (Anthropic) ─────────────────────────────────────────────────
-        // Required headers: x-api-key, anthropic-version: 2023-06-01
         } else if (provider == "claude") {
             auto userMsg = matjson::Value::object();
             userMsg["role"]    = "user";
@@ -994,7 +994,6 @@ protected:
             url = "https://api.anthropic.com/v1/messages";
 
         // ── OpenAI ─────────────────────────────────────────────────────────────
-        // o-series models (o1-mini etc.) reject the "temperature" field.
         } else if (provider == "openai") {
             auto sysMsg  = matjson::Value::object();
             sysMsg["role"]    = "system";
@@ -1008,7 +1007,6 @@ protected:
             requestBody["model"]                 = model;
             requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
             requestBody["max_completion_tokens"] = 16384;
-            requestBody["max_tokens"]            = 16384;
 
             if (!isOSeriesModel(model)) {
                 requestBody["temperature"] = 0.7;
@@ -1017,7 +1015,6 @@ protected:
             url = "https://api.openai.com/v1/chat/completions";
 
         // ── Mistral AI (Ministral) ─────────────────────────────────────────────
-        // OpenAI-compatible endpoint. Auth: Bearer token.
         } else if (provider == "ministral") {
             auto sysMsg  = matjson::Value::object();
             sysMsg["role"]    = "system";
@@ -1036,8 +1033,6 @@ protected:
             url = "https://api.mistral.ai/v1/chat/completions";
 
         // ── HuggingFace Inference API ──────────────────────────────────────────
-        // Uses the OpenAI-compatible /v1/chat/completions endpoint.
-        // Auth: Bearer token. Model is specified in the request body.
         } else if (provider == "huggingface") {
             auto sysMsg  = matjson::Value::object();
             sysMsg["role"]    = "system";
@@ -1056,22 +1051,25 @@ protected:
             url = "https://router.huggingface.co/v1/chat/completions";
 
         // ── Ollama ─────────────────────────────────────────────────────────────
+        // stream=true is REQUIRED — without it, curl times out on large responses
+        // because Ollama doesn't send the final HTTP chunk until generation is done.
+        // With stream=true we get newline-delimited JSON (NDJSON); onAPISuccess
+        // handles the line-by-line parsing and accumulation of the response field.
         } else if (provider == "ollama") {
-            std::string ollamaUrl   = getOllamaUrl();
-            std::string ollamaModel = model; // already fetched via getProviderModel
+            std::string ollamaUrl = getOllamaUrl();
+            log::info("Using Ollama at: {}", ollamaUrl + "/api/generate");
 
             auto options = matjson::Value::object();
             options["temperature"] = 0.7;
 
             requestBody            = matjson::Value::object();
-            requestBody["model"]   = ollamaModel;
+            requestBody["model"]   = model;
             requestBody["prompt"]  = systemPrompt + "\n\n" + fullPrompt;
-            requestBody["stream"]  = true;
-            requestBody["format"]  = "json";
+            requestBody["stream"]  = true;   // REQUIRED: prevents curl timeout
+            requestBody["format"]  = "json"; // tell Ollama to output valid JSON
             requestBody["options"] = options;
 
             url = ollamaUrl + "/api/generate";
-            log::info("Using Ollama at: {}", url);
         }
 
         std::string jsonBody = requestBody.dump();
@@ -1081,9 +1079,7 @@ protected:
         request.header("Content-Type", "application/json");
 
         if (provider == "gemini") {
-            // Gemini authenticates via the x-goog-api-key header.
-            // Google's official docs require the header approach for all new models;
-            // the old ?key= URL parameter is no longer accepted by gemini-2.5-*.
+            // x-goog-api-key header is required for Gemini 2.5+ models.
             request.header("x-goog-api-key", apiKey);
         } else if (provider == "claude") {
             request.header("x-api-key", apiKey);
@@ -1091,7 +1087,8 @@ protected:
         } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
         } else if (provider == "ollama") {
-            request.timeout(std::chrono::seconds(120));
+            // Ollama can be slow on large models; give it generous time.
+            request.timeout(std::chrono::seconds(300));
         }
 
         request.bodyString(jsonBody);
@@ -1177,91 +1174,70 @@ protected:
         }
 
         try {
-            auto jsonRes = response.json();
-            if (!jsonRes) {
-                onError("Invalid Response", "The API returned invalid data.");
-                return;
-            }
-
-            auto json = jsonRes.unwrap();
             std::string aiResponse;
 
-            if (provider == "gemini") {
-                // Check if the entire request was blocked before generation started.
-                // This happens when the prompt itself triggers a safety filter.
-                if (json.contains("promptFeedback")) {
-                    auto blockReasonResult = json["promptFeedback"]["blockReason"].asString();
-                    if (blockReasonResult) {
-                        const std::string& reason = blockReasonResult.unwrap();
-                        if (!reason.empty() && reason != "BLOCK_REASON_UNSPECIFIED") {
-                            onError("Prompt Blocked",
-                                fmt::format("Gemini blocked the request before generating.\n\nReason: {}\n\n"
-                                    "Try rephrasing your prompt.", reason));
-                            return;
-                        }
+            // ── Ollama: NDJSON streaming response ─────────────────────────────
+            // With stream=true, Ollama sends one JSON object per line:
+            //   {"model":"...","response":"chunk","done":false}
+            //   {"model":"...","response":"chunk","done":false}
+            //   {"model":"...","response":"","done":true,"context":[...]}
+            //
+            // response.json() tries to parse the whole body as one JSON object
+            // and always fails on streaming output. We must parse line by line,
+            // accumulate all "response" fields, and verify "done":true on the
+            // final line.
+            if (provider == "ollama") {
+                auto rawResult = response.string();
+                if (!rawResult) {
+                    onError("Invalid Response", "The API returned invalid data.");
+                    return;
+                }
+
+                std::string rawBody = rawResult.unwrap();
+                std::string accumulated;
+                bool isDone = false;
+                int  lineCount = 0;
+
+                std::istringstream bodyStream(rawBody);
+                std::string line;
+                while (std::getline(bodyStream, line)) {
+                    // Trim carriage return from Windows line endings
+                    if (!line.empty() && line.back() == '\r')
+                        line.pop_back();
+                    if (line.empty()) continue;
+
+                    ++lineCount;
+                    auto lineJson = matjson::parse(line);
+                    if (!lineJson) {
+                        // Non-JSON line in the stream — skip silently
+                        log::warn("Ollama: skipping non-JSON stream line {}: {}", lineCount, line.substr(0, 80));
+                        continue;
                     }
-                }
 
-                auto candidates = json["candidates"];
-                if (!candidates.isArray() || candidates.size() == 0) {
-                    onError("No Response", "The AI didn't generate any content."); return;
-                }
+                    auto lineObj = lineJson.unwrap();
 
-                // Check why generation stopped. SAFETY and RECITATION mean the response
-                // was filtered — the text field will be empty or absent in those cases.
-                auto finishReasonResult = candidates[0]["finishReason"].asString();
-                if (finishReasonResult) {
-                    const std::string& finishReason = finishReasonResult.unwrap();
-                    if (finishReason == "SAFETY") {
-                        onError("Response Blocked",
-                            "Gemini's safety filter blocked the generated level.\n\n"
-                            "Try rephrasing your prompt or using different difficulty/style settings.");
+                    // Accumulate text chunks
+                    auto chunk = lineObj["response"].asString();
+                    if (chunk) accumulated += chunk.unwrap();
+
+                    // Check done flag — Ollama sets this true on the final line
+                    auto doneResult = lineObj["done"].asBool();
+                    if (doneResult && doneResult.unwrap()) {
+                        isDone = true;
+                    }
+
+                    // Also surface any Ollama-level error messages
+                    auto errorMsg = lineObj["error"].asString();
+                    if (errorMsg) {
+                        onError("Ollama Error", errorMsg.unwrap());
                         return;
                     }
-                    if (finishReason == "RECITATION") {
-                        onError("Response Blocked",
-                            "Gemini blocked the response due to recitation policy.\n\n"
-                            "Try rephrasing your prompt.");
-                        return;
-                    }
-                    // MAX_TOKENS means the response was cut off — still try to parse
-                    // what we got, but log a warning
-                    if (finishReason == "MAX_TOKENS") {
-                        log::warn("Gemini hit max token limit — response may be truncated");
-                    }
                 }
 
-                auto textResult = candidates[0]["content"]["parts"][0]["text"].asString();
-                if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
-                aiResponse = textResult.unwrap();
+                log::info("Ollama stream: {} lines parsed, done={}, accumulated {} chars",
+                    lineCount, isDone, accumulated.size());
 
-            } else if (provider == "claude") {
-                auto content = json["content"];
-                if (!content.isArray() || content.size() == 0) {
-                    onError("No Response", "The AI didn't generate any content."); return;
-                }
-                auto textResult = content[0]["text"].asString();
-                if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
-                aiResponse = textResult.unwrap();
-
-            // OpenAI, Mistral AI, and HuggingFace all use the same response format
-            } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
-                auto choices = json["choices"];
-                if (!choices.isArray() || choices.size() == 0) {
-                    onError("No Response", "The AI didn't generate any content."); return;
-                }
-                auto textResult = choices[0]["message"]["content"].asString();
-                if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
-                aiResponse = textResult.unwrap();
-
-            } else if (provider == "ollama") {
-                // FIX: treat an incomplete response (done=false) as a hard error.
-                // Previously this only logged a warning and continued trying to parse
-                // the truncated JSON, which always failed with "Failed to parse level
-                // data." — confusing users into thinking the mod was broken rather
-                // than the model running out of context window.
-                auto doneResult = json["done"].asBool();
-                if (doneResult && !doneResult.unwrap()) {
+                if (!isDone) {
                     onError("Incomplete Response",
                         "Ollama stopped generating before the level was complete.\n\n"
                         "Try requesting a shorter level, reducing the max-objects setting, "
@@ -1269,14 +1245,93 @@ protected:
                     return;
                 }
 
-                auto responseResult = json["response"].asString();
-                if (!responseResult) { onError("Invalid Response", "Failed to extract Ollama response."); return; }
-                aiResponse = responseResult.unwrap();
+                if (accumulated.empty()) {
+                    onError("Invalid Response", "Ollama returned an empty response.");
+                    return;
+                }
+
+                aiResponse = accumulated;
+
+            // ── All other providers: standard single-JSON response ─────────────
+            } else {
+                auto jsonRes = response.json();
+                if (!jsonRes) {
+                    onError("Invalid Response", "The API returned invalid data.");
+                    return;
+                }
+
+                auto json = jsonRes.unwrap();
+
+                if (provider == "gemini") {
+                    // Check if the entire request was blocked before generation started.
+                    if (json.contains("promptFeedback")) {
+                        auto blockReasonResult = json["promptFeedback"]["blockReason"].asString();
+                        if (blockReasonResult) {
+                            const std::string& reason = blockReasonResult.unwrap();
+                            if (!reason.empty() && reason != "BLOCK_REASON_UNSPECIFIED") {
+                                onError("Prompt Blocked",
+                                    fmt::format("Gemini blocked the request before generating.\n\nReason: {}\n\n"
+                                        "Try rephrasing your prompt.", reason));
+                                return;
+                            }
+                        }
+                    }
+
+                    auto candidates = json["candidates"];
+                    if (!candidates.isArray() || candidates.size() == 0) {
+                        onError("No Response", "The AI didn't generate any content."); return;
+                    }
+
+                    auto finishReasonResult = candidates[0]["finishReason"].asString();
+                    if (finishReasonResult) {
+                        const std::string& finishReason = finishReasonResult.unwrap();
+                        if (finishReason == "SAFETY") {
+                            onError("Response Blocked",
+                                "Gemini's safety filter blocked the generated level.\n\n"
+                                "Try rephrasing your prompt or using different difficulty/style settings.");
+                            return;
+                        }
+                        if (finishReason == "RECITATION") {
+                            onError("Response Blocked",
+                                "Gemini blocked the response due to recitation policy.\n\n"
+                                "Try rephrasing your prompt.");
+                            return;
+                        }
+                        if (finishReason == "MAX_TOKENS") {
+                            log::warn("Gemini hit max token limit — response may be truncated");
+                        }
+                    }
+
+                    auto textResult = candidates[0]["content"]["parts"][0]["text"].asString();
+                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    aiResponse = textResult.unwrap();
+
+                } else if (provider == "claude") {
+                    auto content = json["content"];
+                    if (!content.isArray() || content.size() == 0) {
+                        onError("No Response", "The AI didn't generate any content."); return;
+                    }
+                    auto textResult = content[0]["text"].asString();
+                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    aiResponse = textResult.unwrap();
+
+                // OpenAI, Mistral AI, and HuggingFace all use the same response format
+                } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
+                    auto choices = json["choices"];
+                    if (!choices.isArray() || choices.size() == 0) {
+                        onError("No Response", "The AI didn't generate any content."); return;
+                    }
+                    auto textResult = choices[0]["message"]["content"].asString();
+                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    aiResponse = textResult.unwrap();
+                }
             }
-            
-            // Log the full raw response
-            log::info("=== Full AI Response from {} ===\n{}\n=== End Response ===", provider, aiResponse);
-            
+
+            // Log the full raw AI response (chunked to prevent truncation)
+            log::info("=== Full AI Response from {} ===", provider);
+            logLong("AIResponse", aiResponse);
+            log::info("=== End AI Response ===");
+
             // Strip markdown code fences if present
             size_t codeBlockStart = aiResponse.find("```");
             while (codeBlockStart != std::string::npos) {
@@ -1307,6 +1362,14 @@ protected:
             if (!objectsArray.isArray() || objectsArray.size() == 0) {
                 onError("No Objects", "The AI didn't generate any objects."); return;
             }
+
+            // Log analysis field if present
+            auto analysisResult = levelData["analysis"].asString();
+            if (analysisResult) {
+                log::info("AI Analysis: {}", analysisResult.unwrap());
+            }
+
+            log::info("Parsed {} objects from AI response", objectsArray.size());
 
             if (m_shouldClearLevel) clearLevel();
             prepareObjects(objectsArray);
@@ -1341,32 +1404,21 @@ public:
 
 // ─── EditorUI hook — mounts AI button onto the NodeIDs "undo-menu" ───────────
 //
-// How geode.node-ids works
-// ────────────────────────
-// NodeIDs is a required dependency that runs low-priority hooks on many GD
-// layers and assigns stable string IDs to their child nodes. Once those hooks
-// have fired, any child can be fetched with  node->getChildByID("some-id")
-// instead of a raw child index that breaks whenever the tree changes.
+// geode.node-ids is a required dependency that runs low-priority hooks on many
+// GD layers and assigns stable string IDs to child nodes. Once those hooks have
+// fired, any child can be fetched with  node->getChildByID("some-id")  instead
+// of a fragile raw child index.
 //
-// For EditorUI specifically, NodeIDs assigns an ID of "undo-menu" to the
-// CCMenu that holds the undo/redo buttons in the top-left of the editor.
+// For EditorUI, NodeIDs assigns "undo-menu" to the CCMenu holding the undo/redo
+// buttons in the top-left of the editor.
 //
-// All NodeIDs hooks run at a very low priority, so they fire before ours.
-// Still, calling NodeIDs::provideFor(this) at the top of init() is the
-// recommended defensive pattern — it's a no-op if IDs are already present,
-// and guarantees correctness in edge cases (e.g. load order surprises).
+// NodeIDs hooks run at very low priority, so they fire before ours. Still,
+// calling NodeIDs::provideFor(this) is the defensive pattern — it's a no-op if
+// IDs are already present, and guarantees correctness in edge cases.
 //
-// After adding our button we must call undoMenu->updateLayout() so that the
-// AxisLayout NodeIDs placed on undo-menu reflowed to include the new child.
-//
-// Visibility management
-// ─────────────────────
-// The button now lives inside undo-menu, so there is no separate CCMenu to
-// show/hide. The playtest and pause-resume hooks look up the button by its
-// mod-prefixed ID ("entity12208.edit-ai/ai-button") directly inside undo-menu.
+// After adding our button we call undoMenu->updateLayout() so the AxisLayout
+// NodeIDs placed on undo-menu reflows to include the new child.
 
-// Helper: find the AI button regardless of which menu it's in.
-// Returns nullptr if geode.node-ids hasn't run or the node was removed.
 static CCNode* getAIButton(EditorUI* ui) {
     if (!ui) return nullptr;
     auto undoMenu = ui->getChildByID("undo-menu");
@@ -1383,11 +1435,8 @@ class $modify(AIEditorUI, EditorUI) {
         if (!EditorUI::init(layer)) return false;
 
         // Ensure NodeIDs has assigned IDs before we look anything up.
-        // This is a no-op if the low-priority NodeIDs hook already ran.
         NodeIDs::provideFor(this);
 
-        // Schedule one frame out as a belt-and-suspenders measure. In practice
-        // provideFor above is sufficient; the delay costs nothing.
         this->runAction(CCSequence::create(
             CCDelayTime::create(0.1f),
             CCCallFunc::create(this, callfunc_selector(AIEditorUI::addAIButton)),
@@ -1399,7 +1448,6 @@ class $modify(AIEditorUI, EditorUI) {
     void addAIButton() {
         if (m_fields->m_buttonAdded) return;
 
-        // Locate the undo-menu assigned by geode.node-ids.
         auto undoMenu = this->getChildByID("undo-menu");
         if (!undoMenu) {
             log::error("EditorAI: 'undo-menu' not found — geode.node-ids may not have run");
@@ -1412,22 +1460,14 @@ class $modify(AIEditorUI, EditorUI) {
             ButtonSprite::create("AI", "goldFont.fnt", "GJ_button_04.png", 0.8f),
             this, menu_selector(AIEditorUI::onAIButton)
         );
-        // Prefix the ID with the mod ID as required by Geode best practices.
         aiButton->setID("ai-button"_spr);
-
         undoMenu->addChild(aiButton);
 
-        // undo-menu uses RowLayout (AxisAlignment::Start, gap 10.f) with a
-        // fixed content size set by NodeIDs (winSize.width/2 - 90.f wide).
-        // On a 480px screen that's only ~150px — barely enough for the three
-        // stock buttons. Widen the content by one button-slot so our button
-        // isn't clipped by the layout engine. We compute the button width from
-        // the node's own content size (available after create()) plus the gap.
+        // undo-menu uses RowLayout with a fixed content size set by NodeIDs.
+        // Widen the content by one button-slot so our button isn't clipped.
         auto currentSize = undoMenu->getContentSize();
-        auto buttonSlot  = aiButton->getContentSize().width + 10.f; // 10.f = undo-menu gap
+        float buttonSlot = aiButton->getContentSize().width + 10.f;
         undoMenu->setContentSize({ currentSize.width + buttonSlot, currentSize.height });
-
-        // Tell the AxisLayout to re-flow all children with the new content size.
         undoMenu->updateLayout();
 
         log::info("EditorAI: AI button mounted on undo-menu");
@@ -1478,7 +1518,7 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("         Editor AI");
+    log::info("         Editor AI v2.1.6");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("Object library: {}", OBJECT_IDS.size() > 10 ? "local file" : "defaults (5 objects)");
