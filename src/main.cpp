@@ -1475,7 +1475,7 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
 
 $execute {
     log::info("========================================");
-    log::info("         Editor AI v2.1.5");
+    log::info("         Editor AI");
     log::info("========================================");
     log::info("Loaded {} object types", OBJECT_IDS.size());
     log::info("Object library: {}", OBJECT_IDS.size() > 10 ? "local file" : "defaults (5 objects)");
