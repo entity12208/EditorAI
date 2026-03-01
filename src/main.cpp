@@ -278,7 +278,7 @@ struct DeferredObject {
 
 // ─── Main generation popup ────────────────────────────────────────────────────
 
-class AIGeneratorPopup : public Popup<> {
+class AIGeneratorPopup : public Popup {
 protected:
     TextInput*               m_promptInput    = nullptr;
     CCLabelBMFont*           m_statusLabel    = nullptr;
@@ -300,7 +300,7 @@ protected:
     // ── init ──────────────────────────────────────────────────────────────────
 
     bool init(LevelEditorLayer* editorLayer) {
-        if (!Popup<>::init(420.f, 300.f))
+        if (!Popup::init(420.f, 300.f))
             return false;
 
         m_editorLayer = editorLayer;
