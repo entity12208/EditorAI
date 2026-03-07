@@ -526,6 +526,7 @@ protected:
             if (m_editorLayer && m_editorLayer->m_editorUI)
                 m_editorLayer->m_editorUI->updateButtons();
 
+            m_generateBtn->setEnabled(true);
             showStatus(fmt::format("Created {} objects!", m_deferredObjects.size()), false);
             Notification::create(
                 fmt::format("Generated {} objects!", m_deferredObjects.size()),
@@ -626,11 +627,12 @@ protected:
 
             // ── Color Trigger properties (advanced features, ID 899) ───────────
             if (advFeatures && gameObj->m_objectID == 899) {
-                auto* effectObj = static_cast<EffectGameObject*>(gameObj);
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
 
                 auto channelResult = objData["color_channel"].asInt();
                 if (channelResult) {
-                    effectObj->m_targetColor = std::clamp((int)channelResult.unwrap(), 1, 999);
+                    effectObj->m_targetColor = std::clamp((int)channelResult.unwrap(), 1, 1010);
                 }
 
                 auto colorHexResult = objData["color"].asString();
@@ -663,7 +665,8 @@ protected:
 
             // ── Move Trigger properties (advanced features, ID 901) ────────────
             if (advFeatures && gameObj->m_objectID == 901) {
-                auto* effectObj = static_cast<EffectGameObject*>(gameObj);
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
 
                 auto targetGroupResult = objData["target_group"].asInt();
                 if (targetGroupResult) {
@@ -1103,6 +1106,21 @@ protected:
     // ── Generate button handler ───────────────────────────────────────────────
 
     void startGeneration(const std::string& prompt, const std::string& apiKey) {
+        // Rate limiting — prevent excessive API calls
+        static std::chrono::steady_clock::time_point lastRequestTime{};
+        if (Mod::get()->getSettingValue<bool>("enable-rate-limiting")) {
+            auto now = std::chrono::steady_clock::now();
+            int64_t minSeconds = Mod::get()->getSettingValue<int64_t>("rate-limit-seconds");
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastRequestTime).count();
+            if (elapsed < minSeconds) {
+                FLAlertLayer::create("Rate Limited",
+                    gd::string(fmt::format("Please wait {} more second(s).", minSeconds - elapsed)),
+                    "OK")->show();
+                return;
+            }
+            lastRequestTime = now;
+        }
+
         m_generateBtn->setEnabled(false);
 
         m_loadingCircle = LoadingCircle::create();
@@ -1161,7 +1179,8 @@ protected:
             m_loadingCircle->fadeAndRemove();
             m_loadingCircle = nullptr;
         }
-        m_generateBtn->setEnabled(true);
+        if (!m_isCreatingObjects)
+            m_generateBtn->setEnabled(true);
 
         if (!response.ok()) {
             auto [title, message] = parseAPIError(
@@ -1332,14 +1351,17 @@ protected:
             logLong("AIResponse", aiResponse);
             log::info("=== End AI Response ===");
 
-            // Strip markdown code fences if present
-            size_t codeBlockStart = aiResponse.find("```");
-            while (codeBlockStart != std::string::npos) {
-                size_t codeBlockEnd = aiResponse.find("```", codeBlockStart + 3);
-                if (codeBlockEnd != std::string::npos) {
-                    aiResponse.erase(codeBlockStart, codeBlockEnd - codeBlockStart + 3);
-                    codeBlockStart = aiResponse.find("```");
-                } else break;
+            // Strip markdown code fence markers (``` and optional language tag)
+            // while preserving the content between them.
+            {
+                size_t pos = 0;
+                while ((pos = aiResponse.find("```", pos)) != std::string::npos) {
+                    size_t end = pos + 3;
+                    // Skip optional language tag on same line (e.g. "json")
+                    while (end < aiResponse.size() && aiResponse[end] != '\n' && aiResponse[end] != '\r')
+                        ++end;
+                    aiResponse.erase(pos, end - pos);
+                }
             }
 
             // Extract JSON object
@@ -1487,9 +1509,11 @@ class $modify(AIEditorUI, EditorUI) {
 class $modify(EditorPauseLayer) {
     void onResume(CCObject* sender) {
         EditorPauseLayer::onResume(sender);
-        if (auto editorUI = m_editorLayer->m_editorUI) {
-            if (auto btn = getAIButton(editorUI))
-                btn->setVisible(true);
+        if (m_editorLayer) {
+            if (auto editorUI = m_editorLayer->m_editorUI) {
+                if (auto btn = getAIButton(editorUI))
+                    btn->setVisible(true);
+            }
         }
     }
 };
