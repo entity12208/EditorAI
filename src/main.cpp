@@ -1424,28 +1424,13 @@ public:
     }
 };
 
-// ─── EditorUI hook — mounts AI button onto the NodeIDs "undo-menu" ───────────
-//
-// geode.node-ids is a required dependency that runs low-priority hooks on many
-// GD layers and assigns stable string IDs to child nodes. Once those hooks have
-// fired, any child can be fetched with  node->getChildByID("some-id")  instead
-// of a fragile raw child index.
-//
-// For EditorUI, NodeIDs assigns "undo-menu" to the CCMenu holding the undo/redo
-// buttons in the top-left of the editor.
-//
-// NodeIDs hooks run at very low priority, so they fire before ours. Still,
-// calling NodeIDs::provideFor(this) is the defensive pattern — it's a no-op if
-// IDs are already present, and guarantees correctness in edge cases.
-//
-// After adding our button we call undoMenu->updateLayout() so the AxisLayout
-// NodeIDs placed on undo-menu reflows to include the new child.
+// ─── EditorUI hook — mounts AI button onto "editor-buttons-menu" ─────────────
 
 static CCNode* getAIButton(EditorUI* ui) {
     if (!ui) return nullptr;
-    auto undoMenu = ui->getChildByID("undo-menu");
-    if (!undoMenu) return nullptr;
-    return undoMenu->getChildByID("ai-button"_spr);
+    auto menu = ui->getChildByID("editor-buttons-menu");
+    if (!menu) return nullptr;
+    return menu->getChildByID("ai-button"_spr);
 }
 
 class $modify(AIEditorUI, EditorUI) {
@@ -1470,9 +1455,9 @@ class $modify(AIEditorUI, EditorUI) {
     void addAIButton() {
         if (m_fields->m_buttonAdded) return;
 
-        auto undoMenu = this->getChildByID("undo-menu");
-        if (!undoMenu) {
-            log::error("EditorAI: 'undo-menu' not found — geode.node-ids may not have run");
+        auto menu = this->getChildByID("editor-buttons-menu");
+        if (!menu) {
+            log::error("EditorAI: 'editor-buttons-menu' not found — geode.node-ids may not have run");
             return;
         }
 
@@ -1483,16 +1468,10 @@ class $modify(AIEditorUI, EditorUI) {
             this, menu_selector(AIEditorUI::onAIButton)
         );
         aiButton->setID("ai-button"_spr);
-        undoMenu->addChild(aiButton);
+        menu->addChild(aiButton);
+        menu->updateLayout();
 
-        // undo-menu uses RowLayout with a fixed content size set by NodeIDs.
-        // Widen the content by one button-slot so our button isn't clipped.
-        auto currentSize = undoMenu->getContentSize();
-        float buttonSlot = aiButton->getContentSize().width + 10.f;
-        undoMenu->setContentSize({ currentSize.width + buttonSlot, currentSize.height });
-        undoMenu->updateLayout();
-
-        log::info("EditorAI: AI button mounted on undo-menu");
+        log::info("EditorAI: AI button mounted on editor-buttons-menu");
     }
 
     void onAIButton(CCObject*) {
