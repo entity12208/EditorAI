@@ -228,6 +228,26 @@
       "name": "Enable Advanced Features",
       "description": "Unlocks all experimental AI capabilities. May produce less stable results.",
       "default": false
+    },
+
+    "feedback-section": {
+      "type": "title",
+      "name": "Feedback & Learning"
+    },
+    "enable-rating": {
+      "type": "bool",
+      "name": "Rate Generations",
+      "description": "After accepting or denying a generation, a popup asks you to rate it 1-10. Top-rated results are fed back to the AI as examples so it learns your style over time.",
+      "default": true
+    },
+    "max-feedback-examples": {
+      "type": "int",
+      "name": "Max Examples in Prompt",
+      "description": "How many top-rated past generations to include as few-shot examples in the AI prompt. More examples = better learning but uses more tokens.",
+      "default": 3,
+      "min": 1,
+      "max": 10,
+      "enable-if": "enable-rating"
     }
 
   },

@@ -276,6 +276,296 @@ struct DeferredObject {
     matjson::Value data;
 };
 
+// ─── Blueprint preview shared state ─────────────────────────────────────────
+// These statics are shared between AIGeneratorPopup (which creates ghost objects)
+// and AIEditorUI (which shows accept/deny buttons). Using statics avoids a
+// circular dependency between the two classes.
+
+static bool s_inPreviewMode = false;
+static std::vector<Ref<GameObject>> s_previewObjects;
+static std::vector<ccColor3B> s_previewOriginalColors;
+
+// Forward declaration — defined after AIEditorUI
+static void showPreviewButtonsOnEditorUI(EditorUI* ui);
+
+// ─── Feedback / rating persistence ──────────────────────────────────────────
+// Stores the last generation context so the rating popup (shown after
+// accept/deny) can save it alongside the user's 1-10 score.
+
+static std::string s_lastUserPrompt;    // the raw prompt the user typed
+static std::string s_lastDifficulty;
+static std::string s_lastStyle;
+static std::string s_lastLength;
+static bool        s_lastWasAccepted = false;
+
+// Each feedback entry saved to disk
+struct FeedbackEntry {
+    std::string prompt;
+    std::string difficulty;
+    std::string style;
+    std::string length;
+    std::string feedback;    // optional free-text from the user
+    int         rating;      // 1-10
+    bool        accepted;    // true = accepted, false = denied
+};
+
+static std::filesystem::path getFeedbackPath() {
+    return Mod::get()->getSaveDir() / "feedback.json";
+}
+
+static std::vector<FeedbackEntry> loadFeedback() {
+    std::vector<FeedbackEntry> entries;
+    auto path = getFeedbackPath();
+    if (!std::filesystem::exists(path)) return entries;
+    try {
+        std::ifstream file(path);
+        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        auto json = matjson::parse(content);
+        if (!json || !json.unwrap().isArray()) return entries;
+        for (auto& item : json.unwrap()) {
+            FeedbackEntry e;
+            auto p = item["prompt"].asString();     if (p) e.prompt     = p.unwrap();
+            auto d = item["difficulty"].asString();  if (d) e.difficulty = d.unwrap();
+            auto s = item["style"].asString();       if (s) e.style     = s.unwrap();
+            auto l = item["length"].asString();      if (l) e.length    = l.unwrap();
+            auto f = item["feedback"].asString();    if (f) e.feedback   = f.unwrap();
+            auto r = item["rating"].asInt();         if (r) e.rating    = r.unwrap();
+            auto a = item["accepted"].asBool();      if (a) e.accepted  = a.unwrap();
+            if (!e.prompt.empty() && e.rating >= 1 && e.rating <= 10)
+                entries.push_back(std::move(e));
+        }
+    } catch (std::exception& ex) {
+        log::error("Failed to load feedback.json: {}", ex.what());
+    }
+    return entries;
+}
+
+static void saveFeedbackEntry(const FeedbackEntry& entry) {
+    auto entries = loadFeedback();
+    entries.push_back(entry);
+
+    // Keep at most 50 entries (oldest dropped)
+    while (entries.size() > 50)
+        entries.erase(entries.begin());
+
+    auto arr = matjson::Value::array();
+    for (auto& e : entries) {
+        auto obj = matjson::Value::object();
+        obj["prompt"]     = e.prompt;
+        obj["difficulty"] = e.difficulty;
+        obj["style"]      = e.style;
+        obj["length"]     = e.length;
+        if (!e.feedback.empty())
+            obj["feedback"] = e.feedback;
+        obj["rating"]     = e.rating;
+        obj["accepted"]   = e.accepted;
+        arr.push(obj);
+    }
+
+    try {
+        std::ofstream file(getFeedbackPath());
+        file << arr.dump();
+        log::info("Saved feedback entry (rating={}, accepted={})", entry.rating, entry.accepted);
+    } catch (std::exception& ex) {
+        log::error("Failed to save feedback.json: {}", ex.what());
+    }
+}
+
+// Returns the top-N highest-rated accepted entries, sorted by rating descending.
+static std::vector<FeedbackEntry> getTopFeedback(int maxCount) {
+    auto entries = loadFeedback();
+
+    // Only use accepted generations as positive examples
+    std::vector<FeedbackEntry> accepted;
+    for (auto& e : entries) {
+        if (e.accepted && e.rating >= 6)
+            accepted.push_back(e);
+    }
+
+    std::sort(accepted.begin(), accepted.end(),
+        [](const FeedbackEntry& a, const FeedbackEntry& b) { return a.rating > b.rating; });
+
+    if ((int)accepted.size() > maxCount)
+        accepted.resize(maxCount);
+    return accepted;
+}
+
+// Returns the N lowest-rated entries that have feedback text, sorted worst first.
+static std::vector<FeedbackEntry> getBottomFeedback(int maxCount) {
+    auto entries = loadFeedback();
+
+    std::vector<FeedbackEntry> negative;
+    for (auto& e : entries) {
+        if (e.rating <= 5 && !e.feedback.empty())
+            negative.push_back(e);
+    }
+
+    std::sort(negative.begin(), negative.end(),
+        [](const FeedbackEntry& a, const FeedbackEntry& b) { return a.rating < b.rating; });
+
+    if ((int)negative.size() > maxCount)
+        negative.resize(maxCount);
+    return negative;
+}
+
+// ─── Rating popup ────────────────────────────────────────────────────────────
+
+class RatingPopup : public Popup {
+protected:
+    int m_selectedRating = 0;
+    std::vector<CCMenuItemSpriteExtra*> m_ratingButtons;
+    CCLabelBMFont* m_ratingLabel     = nullptr;
+    CCLabelBMFont* m_feedbackHint    = nullptr;
+    TextInput*     m_feedbackInput   = nullptr;
+
+    bool init() {
+        if (!Popup::init(380.f, 280.f))
+            return false;
+
+        auto winSize = this->m_size;
+        this->setTitle("Rate This Generation");
+
+        auto descLabel = CCLabelBMFont::create(
+            s_lastWasAccepted ? "How good was this generation?" : "How was this generation?",
+            "bigFont.fnt");
+        descLabel->setScale(0.4f);
+        descLabel->setPosition({winSize.width / 2, winSize.height / 2 + 90});
+        m_mainLayer->addChild(descLabel);
+
+        auto hintLabel = CCLabelBMFont::create("Your ratings help the AI learn your style", "bigFont.fnt");
+        hintLabel->setScale(0.3f);
+        hintLabel->setColor({180, 180, 180});
+        hintLabel->setPosition({winSize.width / 2, winSize.height / 2 + 72});
+        m_mainLayer->addChild(hintLabel);
+
+        // 1-10 rating buttons in two rows of 5
+        auto ratingMenu = CCMenu::create();
+        ratingMenu->setPosition({winSize.width / 2, winSize.height / 2 + 38});
+
+        for (int i = 1; i <= 10; ++i) {
+            auto label = fmt::format("{}", i);
+            auto btn = CCMenuItemSpriteExtra::create(
+                ButtonSprite::create(label.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.6f),
+                this, menu_selector(RatingPopup::onRatingButton)
+            );
+            btn->setTag(i);
+            float col = (float)((i - 1) % 5) - 2.0f;
+            float row = (i <= 5) ? 1.0f : -1.0f;
+            btn->setPosition({col * 50.f, row * 22.f});
+            ratingMenu->addChild(btn);
+            m_ratingButtons.push_back(btn);
+        }
+        m_mainLayer->addChild(ratingMenu);
+
+        m_ratingLabel = CCLabelBMFont::create("", "bigFont.fnt");
+        m_ratingLabel->setScale(0.35f);
+        m_ratingLabel->setPosition({winSize.width / 2, winSize.height / 2 - 10});
+        m_ratingLabel->setVisible(false);
+        m_mainLayer->addChild(m_ratingLabel);
+
+        // Feedback hint — changes text based on selected rating
+        m_feedbackHint = CCLabelBMFont::create("(optional)", "bigFont.fnt");
+        m_feedbackHint->setScale(0.3f);
+        m_feedbackHint->setColor({180, 180, 180});
+        m_feedbackHint->setPosition({winSize.width / 2, winSize.height / 2 - 28});
+        m_mainLayer->addChild(m_feedbackHint);
+
+        // Feedback text input
+        auto inputBG = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
+        inputBG->setContentSize({320, 40});
+        inputBG->setColor({0, 0, 0});
+        inputBG->setOpacity(100);
+        inputBG->setPosition({winSize.width / 2, winSize.height / 2 - 52});
+        m_mainLayer->addChild(inputBG);
+
+        m_feedbackInput = TextInput::create(310, "What could be improved?", "bigFont.fnt");
+        m_feedbackInput->setPosition({winSize.width / 2, winSize.height / 2 - 52});
+        m_feedbackInput->setScale(0.6f);
+        m_feedbackInput->setMaxCharCount(200);
+        m_feedbackInput->getInputNode()->setAllowedChars(
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789-_=+/\\.,;:!@#$%^&*()[]{}|<>?`~'\" "
+        );
+        m_mainLayer->addChild(m_feedbackInput);
+
+        // Submit button
+        auto submitBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Submit", "goldFont.fnt", "GJ_button_01.png", 0.7f),
+            this, menu_selector(RatingPopup::onSubmit)
+        );
+        auto submitMenu = CCMenu::create();
+        submitMenu->setPosition({winSize.width / 2, winSize.height / 2 - 90});
+        submitBtn->setPosition({0, 0});
+        submitMenu->addChild(submitBtn);
+        m_mainLayer->addChild(submitMenu);
+
+        return true;
+    }
+
+    void onRatingButton(CCObject* sender) {
+        auto btn = static_cast<CCMenuItemSpriteExtra*>(sender);
+        m_selectedRating = btn->getTag();
+
+        // Highlight selected button, dim others
+        for (auto* b : m_ratingButtons) {
+            bool selected = (b->getTag() == m_selectedRating);
+            b->setColor(selected ? ccColor3B{255, 255, 255} : ccColor3B{150, 150, 150});
+            b->setScale(selected ? 1.15f : 1.0f);
+        }
+
+        m_ratingLabel->setString(fmt::format("Rating: {}/10", m_selectedRating).c_str());
+        m_ratingLabel->setVisible(true);
+
+        // Update feedback hint and placeholder based on rating range
+        if (m_selectedRating <= 4) {
+            m_feedbackHint->setString("What went wrong? (optional)");
+            m_feedbackInput->setString("");
+        } else if (m_selectedRating <= 7) {
+            m_feedbackHint->setString("What could be better? (optional)");
+            m_feedbackInput->setString("");
+        } else {
+            m_feedbackHint->setString("What did you like? (optional)");
+            m_feedbackInput->setString("");
+        }
+    }
+
+    void onSubmit(CCObject*) {
+        if (m_selectedRating == 0) {
+            FLAlertLayer::create("No Rating", gd::string("Please select a rating first."), "OK")->show();
+            return;
+        }
+
+        FeedbackEntry entry;
+        entry.prompt     = s_lastUserPrompt;
+        entry.difficulty = s_lastDifficulty;
+        entry.style      = s_lastStyle;
+        entry.length     = s_lastLength;
+        entry.feedback   = m_feedbackInput->getString();
+        entry.rating     = m_selectedRating;
+        entry.accepted   = s_lastWasAccepted;
+        saveFeedbackEntry(entry);
+
+        Notification::create(
+            fmt::format("Rated {}/10 — thanks!", m_selectedRating),
+            NotificationIcon::Success
+        )->show();
+
+        this->onClose(nullptr);
+    }
+
+public:
+    static RatingPopup* create() {
+        auto ret = new RatingPopup();
+        if (ret->init()) { ret->autorelease(); return ret; }
+        delete ret;
+        return nullptr;
+    }
+};
+
+// Forward declaration — defined after AIEditorUI
+static void showRatingIfEnabled();
+
 // ─── Main generation popup ────────────────────────────────────────────────────
 
 class AIGeneratorPopup : public Popup {
@@ -523,18 +813,26 @@ protected:
 
         if (m_currentObjectIndex >= m_deferredObjects.size()) {
             m_isCreatingObjects = false;
-            if (m_editorLayer && m_editorLayer->m_editorUI)
+
+            // Enter blueprint preview mode — ghost objects are placed,
+            // user must accept or deny via buttons on the editor UI.
+            s_inPreviewMode = true;
+
+            if (m_editorLayer && m_editorLayer->m_editorUI) {
                 m_editorLayer->m_editorUI->updateButtons();
+                showPreviewButtonsOnEditorUI(m_editorLayer->m_editorUI);
+            }
 
             m_generateBtn->setEnabled(true);
-            showStatus(fmt::format("Created {} objects!", m_deferredObjects.size()), false);
+            showStatus(fmt::format("Preview: {} objects", s_previewObjects.size()), false);
             Notification::create(
-                fmt::format("Generated {} objects!", m_deferredObjects.size()),
-                NotificationIcon::Success
+                fmt::format("Preview: {} ghost objects — accept or deny in editor",
+                    s_previewObjects.size()),
+                NotificationIcon::Info
             )->show();
 
             this->runAction(CCSequence::create(
-                CCDelayTime::create(2.0f),
+                CCDelayTime::create(1.5f),
                 CCCallFunc::create(this, callfunc_selector(AIGeneratorPopup::closePopup)),
                 nullptr
             ));
@@ -570,6 +868,12 @@ protected:
                 }
 
                 applyObjectProperties(gameObj, deferred.data);
+
+                // Blueprint preview: save original color, apply ghost style
+                s_previewOriginalColors.push_back(gameObj->getColor());
+                gameObj->setOpacity(102);              // ~40% opacity
+                gameObj->setColor({100, 180, 255});    // blue tint
+                s_previewObjects.emplace_back(gameObj);
 
             } catch (...) {
                 log::error("Unknown exception in updateObjectCreation at index {}", m_currentObjectIndex);
@@ -705,6 +1009,10 @@ protected:
 
     void prepareObjects(matjson::Value& objectsArray) {
         if (!m_editorLayer || !objectsArray.isArray()) return;
+
+        // Clear any leftover preview state from a previous generation
+        s_previewObjects.clear();
+        s_previewOriginalColors.clear();
 
         m_deferredObjects.clear();
         m_currentObjectIndex = 0;
@@ -886,6 +1194,45 @@ protected:
                 "move trigger targets group 2, the objects it should move must have 2 in their groups array.\n";
         }
 
+        // Inject user feedback as few-shot learning context
+        if (Mod::get()->getSettingValue<bool>("enable-rating")) {
+            int maxExamples = (int)Mod::get()->getSettingValue<int64_t>("max-feedback-examples");
+
+            // Positive examples — what the user liked
+            auto topFeedback = getTopFeedback(maxExamples);
+            if (!topFeedback.empty()) {
+                base += "\n\nUSER LIKES — The user rated these past generations highly. "
+                        "Match this style and quality:\n";
+                for (size_t i = 0; i < topFeedback.size(); ++i) {
+                    auto& fb = topFeedback[i];
+                    base += fmt::format(
+                        "  + (rated {}/10) prompt=\"{}\" difficulty={} style={} length={}",
+                        fb.rating, fb.prompt, fb.difficulty, fb.style, fb.length
+                    );
+                    if (!fb.feedback.empty())
+                        base += fmt::format(" — user said: \"{}\"", fb.feedback);
+                    base += "\n";
+                }
+            }
+
+            // Negative examples — what to avoid
+            auto bottomFeedback = getBottomFeedback(maxExamples);
+            if (!bottomFeedback.empty()) {
+                base += "\n\nUSER DISLIKES — The user rated these poorly. "
+                        "AVOID these mistakes:\n";
+                for (size_t i = 0; i < bottomFeedback.size(); ++i) {
+                    auto& fb = bottomFeedback[i];
+                    base += fmt::format(
+                        "  - (rated {}/10) prompt=\"{}\"",
+                        fb.rating, fb.prompt
+                    );
+                    if (!fb.feedback.empty())
+                        base += fmt::format(" — user complaint: \"{}\"", fb.feedback);
+                    base += "\n";
+                }
+            }
+        }
+
         return base;
     }
 
@@ -909,6 +1256,12 @@ protected:
         std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
         std::string style      = Mod::get()->getSettingValue<std::string>("style");
         std::string length     = Mod::get()->getSettingValue<std::string>("length");
+
+        // Capture generation context for the rating popup
+        s_lastUserPrompt = prompt;
+        s_lastDifficulty = difficulty;
+        s_lastStyle      = style;
+        s_lastLength     = length;
 
         log::info("Calling {} API with model: {}", provider, model);
 
@@ -1436,6 +1789,7 @@ static CCNode* getAIButton(EditorUI* ui) {
 class $modify(AIEditorUI, EditorUI) {
     struct Fields {
         bool m_buttonAdded = false;
+        CCMenu* m_previewButtonMenu = nullptr;
     };
 
     bool init(LevelEditorLayer* layer) {
@@ -1479,9 +1833,120 @@ class $modify(AIEditorUI, EditorUI) {
             FLAlertLayer::create("Error", gd::string("No editor layer found!"), "OK")->show();
             return;
         }
+        if (s_inPreviewMode) {
+            FLAlertLayer::create("Preview Active",
+                gd::string("Please accept or deny the current AI preview first."),
+                "OK")->show();
+            return;
+        }
         AIGeneratorPopup::create(this->m_editorLayer)->show();
     }
+
+    // ── Blueprint preview accept/deny UI ─────────────────────────────────────
+
+    void showPreviewButtons() {
+        if (m_fields->m_previewButtonMenu) return;
+
+        auto menu = CCMenu::create();
+        menu->setID("ai-preview-menu"_spr);
+
+        auto acceptBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Accept", "goldFont.fnt", "GJ_button_01.png", 0.7f),
+            this, menu_selector(AIEditorUI::onAcceptPreview)
+        );
+        acceptBtn->setID("accept-btn"_spr);
+
+        auto denyBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Deny", "goldFont.fnt", "GJ_button_06.png", 0.7f),
+            this, menu_selector(AIEditorUI::onDenyPreview)
+        );
+        denyBtn->setID("deny-btn"_spr);
+
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        menu->setPosition({70.f, winSize.height - 50.f});
+        acceptBtn->setPosition({0.f, 15.f});
+        denyBtn->setPosition({0.f, -15.f});
+
+        menu->addChild(acceptBtn);
+        menu->addChild(denyBtn);
+        this->addChild(menu, 1000);
+
+        m_fields->m_previewButtonMenu = menu;
+        log::info("EditorAI: preview accept/deny buttons shown");
+    }
+
+    void removePreviewButtons() {
+        if (m_fields->m_previewButtonMenu) {
+            m_fields->m_previewButtonMenu->removeFromParentAndCleanup(true);
+            m_fields->m_previewButtonMenu = nullptr;
+        }
+    }
+
+    void onAcceptPreview(CCObject*) {
+        log::info("EditorAI: accepting {} preview objects", s_previewObjects.size());
+
+        for (size_t i = 0; i < s_previewObjects.size(); ++i) {
+            if (GameObject* obj = s_previewObjects[i]) {
+                obj->setOpacity(255);
+                obj->setColor(
+                    i < s_previewOriginalColors.size()
+                        ? s_previewOriginalColors[i]
+                        : ccColor3B{255, 255, 255}
+                );
+            }
+        }
+
+        s_previewObjects.clear();
+        s_previewOriginalColors.clear();
+        s_inPreviewMode = false;
+        removePreviewButtons();
+
+        if (m_editorLayer && m_editorLayer->m_editorUI)
+            m_editorLayer->m_editorUI->updateButtons();
+
+        Notification::create("Objects accepted!", NotificationIcon::Success)->show();
+
+        s_lastWasAccepted = true;
+        showRatingIfEnabled();
+    }
+
+    void onDenyPreview(CCObject*) {
+        log::info("EditorAI: denying {} preview objects", s_previewObjects.size());
+
+        for (auto& objRef : s_previewObjects) {
+            if (GameObject* obj = objRef) {
+                if (m_editorLayer)
+                    m_editorLayer->removeObject(obj, true);
+            }
+        }
+
+        s_previewObjects.clear();
+        s_previewOriginalColors.clear();
+        s_inPreviewMode = false;
+        removePreviewButtons();
+
+        if (m_editorLayer && m_editorLayer->m_editorUI)
+            m_editorLayer->m_editorUI->updateButtons();
+
+        Notification::create("Objects denied and removed.", NotificationIcon::Warning)->show();
+
+        s_lastWasAccepted = false;
+        showRatingIfEnabled();
+    }
 };
+
+// Bridge function: lets AIGeneratorPopup call showPreviewButtons() on EditorUI
+// without needing AIEditorUI's definition (which comes after the popup class).
+static void showPreviewButtonsOnEditorUI(EditorUI* ui) {
+    static_cast<AIEditorUI*>(ui)->showPreviewButtons();
+}
+
+// Shows the rating popup if the setting is enabled.
+static void showRatingIfEnabled() {
+    if (Mod::get()->getSettingValue<bool>("enable-rating")) {
+        RatingPopup::create()->show();
+    }
+}
 
 // ─── EditorPauseLayer hook — restore button visibility on resume ──────────────
 
@@ -1492,6 +1957,8 @@ class $modify(EditorPauseLayer) {
             if (auto editorUI = m_editorLayer->m_editorUI) {
                 if (auto btn = getAIButton(editorUI))
                     btn->setVisible(true);
+                if (auto previewMenu = editorUI->getChildByID("ai-preview-menu"_spr))
+                    previewMenu->setVisible(true);
             }
         }
     }
@@ -1501,6 +1968,14 @@ class $modify(EditorPauseLayer) {
 
 class $modify(AILevelEditorLayer, LevelEditorLayer) {
     void onPlaytest() {
+        // Block playtest while ghost objects are awaiting accept/deny
+        if (s_inPreviewMode) {
+            Notification::create(
+                "Accept or deny the AI preview first!",
+                NotificationIcon::Warning
+            )->show();
+            return;
+        }
         LevelEditorLayer::onPlaytest();
         if (auto editorUI = this->m_editorUI) {
             if (auto btn = getAIButton(editorUI))
@@ -1513,6 +1988,8 @@ class $modify(AILevelEditorLayer, LevelEditorLayer) {
         if (auto editorUI = this->m_editorUI) {
             if (auto btn = getAIButton(editorUI))
                 btn->setVisible(true);
+            if (auto previewMenu = editorUI->getChildByID("ai-preview-menu"_spr))
+                previewMenu->setVisible(true);
         }
     }
 };
