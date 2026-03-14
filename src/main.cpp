@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <sstream>
+#include <unordered_map>
 #include <Geode/Geode.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
@@ -282,6 +283,7 @@ struct DeferredObject {
 // circular dependency between the two classes.
 
 static bool s_inPreviewMode = false;
+static bool s_inEditMode   = false;  // user is editing accepted objects before clicking Done
 static std::vector<Ref<GameObject>> s_previewObjects;
 static std::vector<ccColor3B> s_previewOriginalColors;
 
@@ -297,6 +299,20 @@ static std::string s_lastDifficulty;
 static std::string s_lastStyle;
 static std::string s_lastLength;
 static bool        s_lastWasAccepted = false;
+static std::string s_lastGeneratedJson;  // raw JSON objects array from the AI
+static std::string s_lastEditSummary;       // edit diff from Edit mode (set by onDoneEditing)
+static std::string s_lastEditedObjectsJson; // objects after user edits (set by onDoneEditing)
+
+// Edit tracking: snapshot of accepted objects for implicit feedback
+struct AcceptedObjectSnapshot {
+    int objectID;
+    float x, y;
+};
+static std::vector<AcceptedObjectSnapshot> s_acceptedSnapshot;
+static std::string s_snapshotPrompt;
+static std::string s_snapshotDifficulty;
+static std::string s_snapshotStyle;
+static std::string s_snapshotLength;
 
 // Each feedback entry saved to disk
 struct FeedbackEntry {
@@ -304,9 +320,12 @@ struct FeedbackEntry {
     std::string difficulty;
     std::string style;
     std::string length;
-    std::string feedback;    // optional free-text from the user
-    int         rating;      // 1-10
-    bool        accepted;    // true = accepted, false = denied
+    std::string feedback;          // optional free-text from the user
+    std::string objectsJson;       // the AI's generated objects array (compact JSON)
+    std::string editedObjectsJson; // objects after user edits (via Edit mode)
+    std::string editSummary;       // implicit feedback: what the user changed after accepting
+    int         rating;            // 1-10
+    bool        accepted;          // true = accepted, false = denied
 };
 
 static std::filesystem::path getFeedbackPath() {
@@ -328,7 +347,10 @@ static std::vector<FeedbackEntry> loadFeedback() {
             auto d = item["difficulty"].asString();  if (d) e.difficulty = d.unwrap();
             auto s = item["style"].asString();       if (s) e.style     = s.unwrap();
             auto l = item["length"].asString();      if (l) e.length    = l.unwrap();
-            auto f = item["feedback"].asString();    if (f) e.feedback   = f.unwrap();
+            auto f = item["feedback"].asString();    if (f) e.feedback    = f.unwrap();
+            auto o = item["objectsJson"].asString();       if (o)  e.objectsJson       = o.unwrap();
+            auto eo = item["editedObjectsJson"].asString(); if (eo) e.editedObjectsJson = eo.unwrap();
+            auto es = item["editSummary"].asString();       if (es) e.editSummary       = es.unwrap();
             auto r = item["rating"].asInt();         if (r) e.rating    = r.unwrap();
             auto a = item["accepted"].asBool();      if (a) e.accepted  = a.unwrap();
             if (!e.prompt.empty() && e.rating >= 1 && e.rating <= 10)
@@ -357,6 +379,12 @@ static void saveFeedbackEntry(const FeedbackEntry& entry) {
         obj["length"]     = e.length;
         if (!e.feedback.empty())
             obj["feedback"] = e.feedback;
+        if (!e.objectsJson.empty())
+            obj["objectsJson"] = e.objectsJson;
+        if (!e.editedObjectsJson.empty())
+            obj["editedObjectsJson"] = e.editedObjectsJson;
+        if (!e.editSummary.empty())
+            obj["editSummary"] = e.editSummary;
         obj["rating"]     = e.rating;
         obj["accepted"]   = e.accepted;
         arr.push(obj);
@@ -371,41 +399,187 @@ static void saveFeedbackEntry(const FeedbackEntry& entry) {
     }
 }
 
-// Returns the top-N highest-rated accepted entries, sorted by rating descending.
-static std::vector<FeedbackEntry> getTopFeedback(int maxCount) {
+// Compute similarity score (0.0-1.0) between a feedback entry and the current request.
+// Matching difficulty/style/length each contribute 0.33, so identical settings = 1.0.
+static float feedbackSimilarity(const FeedbackEntry& e,
+                                 const std::string& difficulty,
+                                 const std::string& style,
+                                 const std::string& length) {
+    float score = 0.0f;
+    if (e.difficulty == difficulty) score += 0.33f;
+    if (e.style == style)          score += 0.33f;
+    if (e.length == length)        score += 0.34f;
+    return score;
+}
+
+// Returns the top-N highest-rated accepted entries, prioritized by similarity
+// to the current request, then by rating.
+static std::vector<FeedbackEntry> getTopFeedback(int maxCount,
+                                                  const std::string& difficulty = "",
+                                                  const std::string& style = "",
+                                                  const std::string& length = "") {
     auto entries = loadFeedback();
 
-    // Only use accepted generations as positive examples
     std::vector<FeedbackEntry> accepted;
     for (auto& e : entries) {
         if (e.accepted && e.rating >= 6)
             accepted.push_back(e);
     }
 
+    // Sort by similarity first (most relevant), then by rating
+    bool hasCurrent = !difficulty.empty() || !style.empty() || !length.empty();
     std::sort(accepted.begin(), accepted.end(),
-        [](const FeedbackEntry& a, const FeedbackEntry& b) { return a.rating > b.rating; });
+        [&](const FeedbackEntry& a, const FeedbackEntry& b) {
+            if (hasCurrent) {
+                float simA = feedbackSimilarity(a, difficulty, style, length);
+                float simB = feedbackSimilarity(b, difficulty, style, length);
+                if (simA != simB) return simA > simB;
+            }
+            return a.rating > b.rating;
+        });
 
     if ((int)accepted.size() > maxCount)
         accepted.resize(maxCount);
     return accepted;
 }
 
-// Returns the N lowest-rated entries that have feedback text, sorted worst first.
-static std::vector<FeedbackEntry> getBottomFeedback(int maxCount) {
+// Returns the N lowest-rated entries with feedback text, prioritized by
+// similarity to the current request, then worst-rated first.
+static std::vector<FeedbackEntry> getBottomFeedback(int maxCount,
+                                                     const std::string& difficulty = "",
+                                                     const std::string& style = "",
+                                                     const std::string& length = "") {
     auto entries = loadFeedback();
 
     std::vector<FeedbackEntry> negative;
     for (auto& e : entries) {
-        if (e.rating <= 5 && !e.feedback.empty())
+        if (e.rating <= 5 && (!e.feedback.empty() || !e.editSummary.empty()))
             negative.push_back(e);
     }
 
+    bool hasCurrent = !difficulty.empty() || !style.empty() || !length.empty();
     std::sort(negative.begin(), negative.end(),
-        [](const FeedbackEntry& a, const FeedbackEntry& b) { return a.rating < b.rating; });
+        [&](const FeedbackEntry& a, const FeedbackEntry& b) {
+            if (hasCurrent) {
+                float simA = feedbackSimilarity(a, difficulty, style, length);
+                float simB = feedbackSimilarity(b, difficulty, style, length);
+                if (simA != simB) return simA > simB;
+            }
+            return a.rating < b.rating;
+        });
 
     if ((int)negative.size() > maxCount)
         negative.resize(maxCount);
     return negative;
+}
+
+// Diff accepted snapshot vs current level state. Returns a human-readable
+// summary of what the user changed (deleted objects, moved objects).
+static std::string computeEditSummary(LevelEditorLayer* editor) {
+    if (s_acceptedSnapshot.empty() || !editor) return "";
+
+    // Build a set of current object positions from the editor
+    std::unordered_map<int, std::vector<std::pair<float,float>>> currentObjs;
+    auto* objects = editor->m_objects;
+    if (objects) {
+        for (int i = 0; i < objects->count(); ++i) {
+            auto* obj = static_cast<GameObject*>(objects->objectAtIndex(i));
+            if (obj) {
+                currentObjs[obj->m_objectID].push_back({obj->getPositionX(), obj->getPositionY()});
+            }
+        }
+    }
+
+    int deleted = 0;
+    int moved = 0;
+    int kept = 0;
+    for (auto& snap : s_acceptedSnapshot) {
+        auto it = currentObjs.find(snap.objectID);
+        if (it == currentObjs.end() || it->second.empty()) {
+            ++deleted;
+            continue;
+        }
+        // Find closest match for this snapshot position
+        float bestDist = 999999.f;
+        int bestIdx = -1;
+        for (int j = 0; j < (int)it->second.size(); ++j) {
+            float dx = it->second[j].first - snap.x;
+            float dy = it->second[j].second - snap.y;
+            float dist = dx*dx + dy*dy;
+            if (dist < bestDist) { bestDist = dist; bestIdx = j; }
+        }
+        if (bestDist < 1.0f) {
+            ++kept;
+            it->second.erase(it->second.begin() + bestIdx);
+        } else if (bestDist < 10000.f) {
+            ++moved;
+            it->second.erase(it->second.begin() + bestIdx);
+        } else {
+            ++deleted;
+        }
+    }
+
+    int total = (int)s_acceptedSnapshot.size();
+    if (deleted == 0 && moved == 0) return "";  // user kept everything as-is
+
+    std::string summary;
+    if (deleted > 0)
+        summary += fmt::format("deleted {}/{} objects", deleted, total);
+    if (moved > 0) {
+        if (!summary.empty()) summary += ", ";
+        summary += fmt::format("moved {}/{} objects", moved, total);
+    }
+    if (kept > 0) {
+        if (!summary.empty()) summary += ", ";
+        summary += fmt::format("kept {}/{} unchanged", kept, total);
+    }
+    return summary;
+}
+
+// Capture the current editor objects within the snapshot's X-range as JSON.
+// This gives us the "after editing" state to pair with the original generation.
+static std::string captureEditedObjects(LevelEditorLayer* editor) {
+    if (s_acceptedSnapshot.empty() || !editor) return "";
+
+    // Find the X-range of the original generation
+    float minX = s_acceptedSnapshot[0].x, maxX = s_acceptedSnapshot[0].x;
+    for (auto& snap : s_acceptedSnapshot) {
+        if (snap.x < minX) minX = snap.x;
+        if (snap.x > maxX) maxX = snap.x;
+    }
+    // Pad the range slightly to catch objects the user moved near the edges
+    minX -= 30.f;
+    maxX += 30.f;
+
+    // Build reverse lookup: object ID -> type name
+    static std::unordered_map<int, std::string> idToName;
+    if (idToName.empty()) {
+        for (auto& [name, id] : OBJECT_IDS)
+            idToName[id] = name;
+    }
+
+    auto arr = matjson::Value::array();
+    auto* objects = editor->m_objects;
+    if (objects) {
+        for (int i = 0; i < objects->count(); ++i) {
+            auto* obj = static_cast<GameObject*>(objects->objectAtIndex(i));
+            if (!obj) continue;
+            float ox = obj->getPositionX();
+            if (ox < minX || ox > maxX) continue;
+
+            auto entry = matjson::Value::object();
+            auto nameIt = idToName.find(obj->m_objectID);
+            if (nameIt != idToName.end())
+                entry["type"] = nameIt->second;
+            else
+                entry["id"] = obj->m_objectID;
+            entry["x"] = (int)obj->getPositionX();
+            entry["y"] = (int)obj->getPositionY();
+            arr.push(entry);
+        }
+    }
+
+    return arr.size() > 0 ? arr.dump() : "";
 }
 
 // ─── Rating popup ────────────────────────────────────────────────────────────
@@ -537,14 +711,19 @@ protected:
         }
 
         FeedbackEntry entry;
-        entry.prompt     = s_lastUserPrompt;
-        entry.difficulty = s_lastDifficulty;
-        entry.style      = s_lastStyle;
-        entry.length     = s_lastLength;
-        entry.feedback   = m_feedbackInput->getString();
-        entry.rating     = m_selectedRating;
-        entry.accepted   = s_lastWasAccepted;
+        entry.prompt      = s_lastUserPrompt;
+        entry.difficulty  = s_lastDifficulty;
+        entry.style       = s_lastStyle;
+        entry.length      = s_lastLength;
+        entry.feedback    = m_feedbackInput->getString();
+        entry.objectsJson       = s_lastGeneratedJson;
+        entry.editedObjectsJson = s_lastEditedObjectsJson;
+        entry.editSummary       = s_lastEditSummary;
+        entry.rating            = m_selectedRating;
+        entry.accepted          = s_lastWasAccepted;
         saveFeedbackEntry(entry);
+        s_lastEditSummary.clear();
+        s_lastEditedObjectsJson.clear();
 
         Notification::create(
             fmt::format("Rated {}/10 — thanks!", m_selectedRating),
@@ -780,6 +959,7 @@ protected:
             std::string typeName;
             if (id == 899) typeName = "color_trigger";
             else if (id == 901) typeName = "move_trigger";
+            else if (id == 34)  typeName = "end_trigger";
             else {
                 typeName = "unknown";
                 auto it = idToName.find(id);
@@ -929,6 +1109,36 @@ protected:
                 }
             }
 
+            // ── Color channel assignment ──────────────────────────────────────
+            // Assigns the object's base color to a GD color channel (1-999).
+            // Objects on the same channel change together when a color trigger fires.
+            auto baseColorResult = objData["color_channel"].asInt();
+            if (baseColorResult) {
+                int ch = std::clamp((int)baseColorResult.unwrap(), 1, 1010);
+                if (gameObj->m_baseColor) {
+                    gameObj->m_baseColor->m_colorID = ch;
+                }
+            }
+
+            auto detailColorResult = objData["detail_color_channel"].asInt();
+            if (detailColorResult) {
+                int ch = std::clamp((int)detailColorResult.unwrap(), 1, 1010);
+                if (gameObj->m_detailColor) {
+                    gameObj->m_detailColor->m_colorID = ch;
+                }
+            }
+
+            // ── Multi-activate (orbs, pads, triggers, portals) ─────────────
+            if (advFeatures) {
+                auto multiResult = objData["multi_activate"].asBool();
+                if (multiResult && multiResult.unwrap()) {
+                    auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                    if (effectObj) {
+                        effectObj->m_isMultiTriggered = true;
+                    }
+                }
+            }
+
             // ── Color Trigger properties (advanced features, ID 899) ───────────
             if (advFeatures && gameObj->m_objectID == 899) {
                 auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
@@ -999,8 +1209,217 @@ protected:
                     effectObj->m_easingType = EasingType::None;
                 }
 
+                auto easingRateResult = objData["easing_rate"].asDouble();
+                if (easingRateResult) {
+                    effectObj->m_easingRate = std::clamp(
+                        static_cast<float>(easingRateResult.unwrap()), 0.01f, 100.0f);
+                }
+
+                auto lockXResult = objData["lock_to_player_x"].asBool();
+                if (lockXResult && lockXResult.unwrap()) {
+                    effectObj->m_lockToPlayerX = true;
+                }
+
+                auto lockYResult = objData["lock_to_player_y"].asBool();
+                if (lockYResult && lockYResult.unwrap()) {
+                    effectObj->m_lockToPlayerY = true;
+                }
+
                 effectObj->m_isTouchTriggered = true;
             }
+
+            // ── Alpha Trigger (ID 1007) — fades a group's opacity ──────────────
+            if (advFeatures && gameObj->m_objectID == 1007) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                auto opacityResult = objData["opacity"].asDouble();
+                if (opacityResult) {
+                    effectObj->m_opacity = std::clamp(
+                        static_cast<float>(opacityResult.unwrap()), 0.0f, 1.0f);
+                }
+
+                auto durResult = objData["duration"].asDouble();
+                if (durResult) {
+                    effectObj->m_duration = std::clamp(
+                        static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
+                }
+
+                auto easingResult = objData["easing"].asInt();
+                if (easingResult) {
+                    effectObj->m_easingType = (EasingType)std::clamp((int)easingResult.unwrap(), 0, 18);
+                }
+
+                auto easingRateResult = objData["easing_rate"].asDouble();
+                if (easingRateResult) {
+                    effectObj->m_easingRate = std::clamp(
+                        static_cast<float>(easingRateResult.unwrap()), 0.01f, 100.0f);
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Rotate Trigger (ID 1346) — rotates a group around a center ─────
+            if (advFeatures && gameObj->m_objectID == 1346) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                auto centerGroupResult = objData["center_group"].asInt();
+                if (centerGroupResult) {
+                    effectObj->m_centerGroupID = std::clamp((int)centerGroupResult.unwrap(), 1, 9999);
+                }
+
+                auto degreesResult = objData["degrees"].asDouble();
+                if (degreesResult) {
+                    effectObj->m_rotationDegrees = static_cast<float>(degreesResult.unwrap());
+                }
+
+                auto durResult = objData["duration"].asDouble();
+                if (durResult) {
+                    effectObj->m_duration = std::clamp(
+                        static_cast<float>(durResult.unwrap()), 0.0f, 30.0f);
+                }
+
+                auto easingResult = objData["easing"].asInt();
+                if (easingResult) {
+                    effectObj->m_easingType = (EasingType)std::clamp((int)easingResult.unwrap(), 0, 18);
+                }
+
+                auto easingRateResult = objData["easing_rate"].asDouble();
+                if (easingRateResult) {
+                    effectObj->m_easingRate = std::clamp(
+                        static_cast<float>(easingRateResult.unwrap()), 0.01f, 100.0f);
+                }
+
+                auto lockRotResult = objData["lock_object_rotation"].asBool();
+                if (lockRotResult && lockRotResult.unwrap()) {
+                    effectObj->m_lockObjectRotation = true;
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Toggle Trigger (ID 1049) — shows or hides a group ──────────────
+            if (advFeatures && gameObj->m_objectID == 1049) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                auto activateResult = objData["activate_group"].asBool();
+                if (activateResult) {
+                    effectObj->m_activateGroup = activateResult.unwrap();
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Pulse Trigger (ID 1006) — pulses color on a group or channel ───
+            if (advFeatures && gameObj->m_objectID == 1006) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                // Can target either a group or a color channel
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                    effectObj->m_pulseTargetType = 1;  // group
+                }
+
+                auto targetColorResult = objData["target_color_channel"].asInt();
+                if (targetColorResult) {
+                    effectObj->m_targetColor = std::clamp((int)targetColorResult.unwrap(), 1, 1010);
+                    effectObj->m_pulseTargetType = 0;  // color channel
+                }
+
+                auto colorHexResult = objData["color"].asString();
+                if (colorHexResult) {
+                    GLubyte r = 255, g = 255, b = 255;
+                    if (parseHexColor(colorHexResult.unwrap(), r, g, b)) {
+                        effectObj->m_triggerTargetColor = {r, g, b};
+                    }
+                }
+
+                auto fadeInResult = objData["fade_in"].asDouble();
+                if (fadeInResult) {
+                    effectObj->m_fadeInDuration = std::clamp(
+                        static_cast<float>(fadeInResult.unwrap()), 0.0f, 10.0f);
+                }
+
+                auto holdResult = objData["hold"].asDouble();
+                if (holdResult) {
+                    effectObj->m_holdDuration = std::clamp(
+                        static_cast<float>(holdResult.unwrap()), 0.0f, 10.0f);
+                }
+
+                auto fadeOutResult = objData["fade_out"].asDouble();
+                if (fadeOutResult) {
+                    effectObj->m_fadeOutDuration = std::clamp(
+                        static_cast<float>(fadeOutResult.unwrap()), 0.0f, 10.0f);
+                }
+
+                auto exclusiveResult = objData["exclusive"].asBool();
+                if (exclusiveResult) {
+                    effectObj->m_pulseExclusive = exclusiveResult.unwrap();
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Spawn Trigger (ID 1268) — spawns/activates another trigger group
+            if (advFeatures && gameObj->m_objectID == 1268) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                auto delayResult = objData["delay"].asDouble();
+                if (delayResult) {
+                    effectObj->m_spawnTriggerDelay = std::clamp(
+                        static_cast<float>(delayResult.unwrap()), 0.0f, 30.0f);
+                }
+
+                auto editorDisableResult = objData["editor_disable"].asBool();
+                if (editorDisableResult) {
+                    effectObj->m_previewDisable = editorDisableResult.unwrap();
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Stop Trigger (ID 1616) — stops a trigger group ─────────────────
+            if (advFeatures && gameObj->m_objectID == 1616) {
+                auto* effectObj = typeinfo_cast<EffectGameObject*>(gameObj);
+                if (!effectObj) return;
+
+                auto targetGroupResult = objData["target_group"].asInt();
+                if (targetGroupResult) {
+                    effectObj->m_targetGroupID = std::clamp((int)targetGroupResult.unwrap(), 1, 9999);
+                }
+
+                effectObj->m_isTouchTriggered = true;
+            }
+
+            // ── Show/Hide Player triggers (1613/1612) — no extra properties ────
+            // ── Show/Hide Trail triggers (32/33) — no extra properties ──────────
+            // ── Speed portals (200-203, 1334) — no extra properties ─────────────
+            // These work by their object ID alone, no fields needed.
 
         } catch (...) {
             log::warn("Failed to apply object properties");
@@ -1030,10 +1449,17 @@ protected:
                 auto typeResult = objectsArray[i]["type"].asString();
                 if (typeResult) {
                     const std::string& typeName = typeResult.unwrap();
-                    if (typeName == "color_trigger") {
-                        objectsArray[i]["id"] = 899;
-                    } else if (typeName == "move_trigger") {
-                        objectsArray[i]["id"] = 901;
+                    // Triggers with hardcoded IDs not in object_ids.json
+                    static const std::unordered_map<std::string, int> TRIGGER_IDS = {
+                        {"color_trigger", 899},
+                        {"move_trigger", 901},
+                        {"end_trigger", 34},
+                        {"show_trail_trigger", 32},
+                        {"hide_trail_trigger", 33},
+                    };
+                    auto trigIt = TRIGGER_IDS.find(typeName);
+                    if (trigIt != TRIGGER_IDS.end()) {
+                        objectsArray[i]["id"] = trigIt->second;
                     } else {
                         auto it = OBJECT_IDS.find(typeName);
                         objectsArray[i]["id"] = (it != OBJECT_IDS.end()) ? it->second : 1;
@@ -1151,12 +1577,23 @@ protected:
                 "  * Do not include fields with null values — omit them entirely\n\n"
 
                 "1. GROUP IDs — Assign up to 10 group IDs per object with the optional \"groups\" array.\n"
-                "   Objects must be in a group for a move/toggle trigger to target them.\n"
-                "   Example: {\"type\": \"platform\", \"x\": 100, \"y\": 10, \"groups\": [1]}\n\n"
+                "   Objects must be in a group for a move/toggle/rotate/alpha trigger to target them.\n"
+                "   Example: {\"type\": \"block_black_gradient_square\", \"x\": 100, \"y\": 10, \"groups\": [1]}\n\n"
 
-                "2. COLOR TRIGGERS (type \"color_trigger\", ID 899)\n"
-                "   Place at x positions where the color should change; set y to 0 (ground-level).\n"
-                "   They fire automatically when the player reaches them.\n"
+                "2. COLOR CHANNELS — Assign any object to a color channel so it responds to color triggers.\n"
+                "   \"color_channel\": integer 1-999 — the base (primary) color channel\n"
+                "   \"detail_color_channel\": integer 1-999 — the detail (secondary) color channel\n"
+                "   Standard channels: 1=BG, 2=Ground, 3=Line, 4=3DL, 5=Object, 6=Player1, 7=Player2\n"
+                "   Use custom channels (e.g. 10, 11, 12) and pair with color triggers to create themed sections.\n"
+                "   All objects on the same channel change color together when a color trigger targeting that channel fires.\n"
+                "   Example: {\"type\":\"block_black_gradient_square\",\"x\":100,\"y\":10,\"color_channel\":10}\n\n"
+
+                "3. MULTI-ACTIVATE — Add \"multi_activate\": true to any orb, pad, portal, or trigger\n"
+                "   to let it fire every time the player touches it, not just the first time.\n"
+                "   Useful for orbs in repeating sections or triggers that should fire on every pass.\n\n"
+
+                "4. COLOR TRIGGERS (type \"color_trigger\", ID 899)\n"
+                "   Changes a color channel over time. Fires when the player reaches its X position.\n"
                 "   Required fields:\n"
                 "     \"color_channel\": integer 1-999 — which GD channel to change\n"
                 "       (1=Background, 2=Ground1, 3=Line, 4=Object, 1000=Player1, 1001=Player2)\n"
@@ -1164,47 +1601,143 @@ protected:
                 "   Optional fields:\n"
                 "     \"duration\": float seconds (default 0.5)\n"
                 "     \"blending\": true/false — additive blend (default false)\n"
-                "     \"opacity\": 0.0-1.0 (default 1.0)\n"
+                "     \"opacity\": 0.0-1.0 — channel opacity (default 1.0)\n"
                 "   Example: {\"type\":\"color_trigger\",\"x\":170,\"y\":0,\"color_channel\":1,\"color\":\"#FF4400\",\"duration\":1.0}\n\n"
 
-                "3. MOVE TRIGGERS (type \"move_trigger\", ID 901)\n"
-                "   Move a group of objects by an offset over time. Objects must already have a\n"
-                "   matching group ID assigned via the \"groups\" field.\n"
-                "   Place the trigger at y=0 so the player activates it on the ground.\n"
+                "5. MOVE TRIGGERS (type \"move_trigger\", ID 901)\n"
+                "   Moves a group of objects by an offset over time. Objects must have a matching group ID.\n"
+                "   Place at y=0 so the player activates it on the ground.\n"
                 "   Required fields:\n"
-                "     \"target_group\": integer 1-9999 — group ID to move (must match object groups)\n"
-                "     \"move_x\": float — horizontal distance in GD units (10 = 1 grid cell, negative = left)\n"
-                "     \"move_y\": float — vertical distance in GD units (positive = up)\n"
+                "     \"target_group\": integer 1-9999 — group ID to move\n"
+                "     \"move_x\": float — horizontal offset in GD units (10 = 1 grid cell, negative = left)\n"
+                "     \"move_y\": float — vertical offset (positive = up)\n"
                 "   Optional fields:\n"
                 "     \"duration\": float seconds (default 0.5)\n"
-                "     \"easing\": integer 0-9\n"
+                "     \"easing\": integer 0-18\n"
                 "       0=None, 1=EaseInOut, 2=EaseIn, 3=EaseOut,\n"
                 "       4=ElasticInOut, 5=ElasticIn, 6=ElasticOut,\n"
-                "       7=BounceInOut, 8=BounceIn, 9=BounceOut\n"
+                "       7=BounceInOut, 8=BounceIn, 9=BounceOut,\n"
+                "       10=ExponentialInOut, 11=ExponentialIn, 12=ExponentialOut,\n"
+                "       13=SineInOut, 14=SineIn, 15=SineOut,\n"
+                "       16=BackInOut, 17=BackIn, 18=BackOut\n"
+                "     \"easing_rate\": float (0.01-100, controls how extreme the easing curve is, default ~2.0)\n"
+                "     \"lock_to_player_x\": true — object follows the player's X position\n"
+                "     \"lock_to_player_y\": true — object follows the player's Y position\n"
                 "   IMPORTANT: The trigger and the objects it moves are SEPARATE. Place the trigger\n"
-                "   where the player will reach it, and place the objects being moved wherever they\n"
-                "   should start (they will shift by move_x/move_y when the trigger fires).\n"
+                "   where the player will reach it; place the objects wherever they should start.\n"
                 "   Example:\n"
-                "     Objects to move:    {\"type\":\"block_black_gradient_square\",\"x\":270,\"y\":30,\"groups\":[2]}\n"
-                "     Trigger to fire it: {\"type\":\"move_trigger\",\"x\":170,\"y\":0,\"target_group\":2,\"move_x\":0,\"move_y\":30,\"duration\":0.5,\"easing\":1}\n\n"
+                "     Objects:  {\"type\":\"block_black_gradient_square\",\"x\":270,\"y\":30,\"groups\":[2]}\n"
+                "     Trigger:  {\"type\":\"move_trigger\",\"x\":170,\"y\":0,\"target_group\":2,\"move_x\":0,\"move_y\":30,\"duration\":0.5,\"easing\":1}\n\n"
 
-                "Use advanced features purposefully to enhance the level. Color triggers set the mood\n"
-                "at natural section changes (drops, transitions). Move triggers add dynamic platforming\n"
-                "elements like rising platforms or sliding walls. Keep group IDs consistent — if a\n"
-                "move trigger targets group 2, the objects it should move must have 2 in their groups array.\n";
+                "6. ALPHA TRIGGER (type \"alpha_trigger\", ID 1007)\n"
+                "   Fades a group's opacity in or out over time. Great for making objects appear/disappear.\n"
+                "   Required fields:\n"
+                "     \"target_group\": integer 1-9999 — group ID to fade\n"
+                "     \"opacity\": 0.0-1.0 — target opacity (0 = invisible, 1 = fully visible)\n"
+                "   Optional fields:\n"
+                "     \"duration\": float seconds (default 0.5)\n"
+                "     \"easing\": integer 0-18 (same values as move trigger)\n"
+                "     \"easing_rate\": float (0.01-100)\n"
+                "   Example: {\"type\":\"alpha_trigger\",\"x\":200,\"y\":0,\"target_group\":3,\"opacity\":0.0,\"duration\":1.0}\n\n"
+
+                "7. ROTATE TRIGGER (type \"rotate_trigger\", ID 1346)\n"
+                "   Rotates a group of objects around a center point over time.\n"
+                "   Required fields:\n"
+                "     \"target_group\": integer 1-9999 — group to rotate\n"
+                "     \"degrees\": float — rotation amount (positive = clockwise, negative = counter-clockwise)\n"
+                "   Optional fields:\n"
+                "     \"center_group\": integer 1-9999 — group ID to use as the rotation center\n"
+                "       (if omitted, rotates around each object's own center)\n"
+                "     \"duration\": float seconds (default 0.5)\n"
+                "     \"easing\": integer 0-18 (same values as move trigger)\n"
+                "     \"easing_rate\": float (0.01-100)\n"
+                "     \"lock_object_rotation\": true — objects keep facing the same direction while orbiting\n"
+                "   Example: {\"type\":\"rotate_trigger\",\"x\":300,\"y\":0,\"target_group\":4,\"center_group\":5,\"degrees\":360,\"duration\":2.0,\"easing\":1}\n\n"
+
+                "8. TOGGLE TRIGGER (type \"toggle_trigger\", ID 1049)\n"
+                "   Shows or hides a group of objects instantly. Use to reveal hidden paths or remove obstacles.\n"
+                "   Required fields:\n"
+                "     \"target_group\": integer 1-9999 — group to toggle\n"
+                "     \"activate_group\": true/false — true = show the group, false = hide it\n"
+                "   Example: {\"type\":\"toggle_trigger\",\"x\":500,\"y\":0,\"target_group\":6,\"activate_group\":false}\n\n"
+
+                "9. PULSE TRIGGER (type \"pulse_trigger\", ID 1006)\n"
+                "   Pulses a group or color channel with a temporary color flash. Great for visual emphasis.\n"
+                "   Target ONE of:\n"
+                "     \"target_group\": integer — pulse objects in this group\n"
+                "     \"target_color_channel\": integer — pulse this color channel instead\n"
+                "   Required fields:\n"
+                "     \"color\": \"#RRGGBB\" — the color to pulse\n"
+                "   Optional fields:\n"
+                "     \"fade_in\": float seconds (default 0.0)\n"
+                "     \"hold\": float seconds (default 0.0)\n"
+                "     \"fade_out\": float seconds (default 0.0)\n"
+                "     \"exclusive\": true/false — only this pulse affects the target (default false)\n"
+                "   Example: {\"type\":\"pulse_trigger\",\"x\":400,\"y\":0,\"target_group\":1,\"color\":\"#FF0000\",\"fade_in\":0.1,\"hold\":0.3,\"fade_out\":0.5}\n\n"
+
+                "10. SPAWN TRIGGER (type \"spawn_trigger\", ID 1268)\n"
+                "   Activates another trigger group after a delay. Lets you chain trigger sequences\n"
+                "   or fire triggers that aren't at ground level.\n"
+                "   Required fields:\n"
+                "     \"target_group\": integer 1-9999 — group containing the trigger(s) to activate\n"
+                "   Optional fields:\n"
+                "     \"delay\": float seconds (default 0.0)\n"
+                "     \"editor_disable\": true — prevent this trigger from firing in the editor\n"
+                "   Example: {\"type\":\"spawn_trigger\",\"x\":100,\"y\":0,\"target_group\":7,\"delay\":0.5}\n\n"
+
+                "11. STOP TRIGGER (type \"stop_trigger\", ID 1616)\n"
+                "    Stops all active triggers targeting a specific group. Use to cancel ongoing\n"
+                "    move/rotate/alpha animations.\n"
+                "    Required fields:\n"
+                "      \"target_group\": integer 1-9999 — group whose triggers to stop\n"
+                "    Example: {\"type\":\"stop_trigger\",\"x\":600,\"y\":0,\"target_group\":2}\n\n"
+
+                "12. SPEED PORTALS — Change the game speed. Place at y=0. No extra fields needed.\n"
+                "    Types: \"speed_portal_half\" (0.5x slow), \"speed_portal_normal\" (1x),\n"
+                "    \"speed_portal_double\" (2x), \"speed_portal_triple\" (3x), \"speed_portal_quadruple\" (4x)\n"
+                "    Example: {\"type\":\"speed_portal_double\",\"x\":300,\"y\":0}\n\n"
+
+                "13. PLAYER VISIBILITY TRIGGERS — No extra fields. Place at y=0.\n"
+                "    \"show_player_trigger\" (ID 1613) — makes the player icon visible\n"
+                "    \"hide_player_trigger\" (ID 1612) — makes the player icon invisible\n"
+                "    Use hide before a cutscene/effect, show after to restore visibility.\n\n"
+
+                "14. TRAIL TRIGGERS — No extra fields. Place at y=0.\n"
+                "    \"show_trail_trigger\" (or \"effect_enable_ghost_trail\", ID 32) — enables the player's ghost trail\n"
+                "    \"hide_trail_trigger\" (or \"effect_disable_ghost_trail\", ID 33) — disables the ghost trail\n\n"
+
+                "15. END TRIGGER — Mark the end of the level. No extra fields.\n"
+                "    \"end_trigger\" (or \"effect_10_level_end_trigger\", ID 34)\n"
+                "    Place at the X position where the level should end.\n"
+                "    Example: {\"type\":\"end_trigger\",\"x\":2000,\"y\":0}\n\n"
+
+                "TRIGGER DESIGN TIPS:\n"
+                "- All triggers fire when the player reaches their X position. Place at y=0.\n"
+                "- Keep group IDs consistent — if a trigger targets group 2, the affected objects\n"
+                "  must have 2 in their \"groups\" array.\n"
+                "- Color triggers set mood at section changes. Alpha triggers create fade-in reveals.\n"
+                "- Move triggers add dynamic platforms. Rotate triggers spin decorations or obstacles.\n"
+                "- Toggle triggers hide/show secret paths. Pulse triggers add visual emphasis at drops.\n"
+                "- Spawn triggers chain sequences. Stop triggers cancel ongoing animations.\n"
+                "- Speed portals control pacing — slow down for tricky sections, speed up for straights.\n"
+                "- Use multi_activate on orbs/triggers in looping sections.\n";
         }
 
-        // Inject user feedback as few-shot learning context
+        // Inject user feedback as few-shot learning context.
+        // Examples are prioritized by similarity to the current request
+        // (matching difficulty/style/length), then by rating.
         if (Mod::get()->getSettingValue<bool>("enable-rating")) {
             int maxExamples = (int)Mod::get()->getSettingValue<int64_t>("max-feedback-examples");
+            auto curDiff  = s_lastDifficulty;
+            auto curStyle = s_lastStyle;
+            auto curLen   = s_lastLength;
 
-            // Positive examples — what the user liked
-            auto topFeedback = getTopFeedback(maxExamples);
+            // Positive examples — what the user liked, with actual output
+            auto topFeedback = getTopFeedback(maxExamples, curDiff, curStyle, curLen);
             if (!topFeedback.empty()) {
                 base += "\n\nUSER LIKES — The user rated these past generations highly. "
-                        "Match this style and quality:\n";
-                for (size_t i = 0; i < topFeedback.size(); ++i) {
-                    auto& fb = topFeedback[i];
+                        "Study the actual output and match this style and quality:\n";
+                for (auto& fb : topFeedback) {
                     base += fmt::format(
                         "  + (rated {}/10) prompt=\"{}\" difficulty={} style={} length={}",
                         fb.rating, fb.prompt, fb.difficulty, fb.style, fb.length
@@ -1212,16 +1745,22 @@ protected:
                     if (!fb.feedback.empty())
                         base += fmt::format(" — user said: \"{}\"", fb.feedback);
                     base += "\n";
+                    // Include the actual objects JSON so the model can learn from it
+                    if (!fb.objectsJson.empty())
+                        base += fmt::format("    AI generated: {}\n", fb.objectsJson);
+                    if (!fb.editedObjectsJson.empty())
+                        base += fmt::format("    user corrected to: {}\n", fb.editedObjectsJson);
+                    else if (!fb.editSummary.empty())
+                        base += fmt::format("    user edits: {} (learn from what they kept)\n", fb.editSummary);
                 }
             }
 
-            // Negative examples — what to avoid
-            auto bottomFeedback = getBottomFeedback(maxExamples);
+            // Negative examples — what to avoid, with actual output
+            auto bottomFeedback = getBottomFeedback(maxExamples, curDiff, curStyle, curLen);
             if (!bottomFeedback.empty()) {
                 base += "\n\nUSER DISLIKES — The user rated these poorly. "
-                        "AVOID these mistakes:\n";
-                for (size_t i = 0; i < bottomFeedback.size(); ++i) {
-                    auto& fb = bottomFeedback[i];
+                        "AVOID reproducing these patterns:\n";
+                for (auto& fb : bottomFeedback) {
                     base += fmt::format(
                         "  - (rated {}/10) prompt=\"{}\"",
                         fb.rating, fb.prompt
@@ -1229,6 +1768,12 @@ protected:
                     if (!fb.feedback.empty())
                         base += fmt::format(" — user complaint: \"{}\"", fb.feedback);
                     base += "\n";
+                    if (!fb.objectsJson.empty())
+                        base += fmt::format("    AI generated: {}\n", fb.objectsJson);
+                    if (!fb.editedObjectsJson.empty())
+                        base += fmt::format("    user corrected to: {}\n", fb.editedObjectsJson);
+                    else if (!fb.editSummary.empty())
+                        base += fmt::format("    user edits: {} (these objects were problematic)\n", fb.editSummary);
                 }
             }
         }
@@ -1738,6 +2283,9 @@ protected:
                 onError("No Objects", "The AI didn't generate any objects."); return;
             }
 
+            // Capture the generated objects JSON for feedback storage
+            s_lastGeneratedJson = objectsArray.dump();
+
             // Log analysis field if present
             auto analysisResult = levelData["analysis"].asString();
             if (analysisResult) {
@@ -1833,9 +2381,11 @@ class $modify(AIEditorUI, EditorUI) {
             FLAlertLayer::create("Error", gd::string("No editor layer found!"), "OK")->show();
             return;
         }
-        if (s_inPreviewMode) {
+        if (s_inPreviewMode || s_inEditMode) {
             FLAlertLayer::create("Preview Active",
-                gd::string("Please accept or deny the current AI preview first."),
+                gd::string(s_inEditMode
+                    ? "Please press Done to finish editing first."
+                    : "Please accept, edit, or deny the current AI preview first."),
                 "OK")->show();
             return;
         }
@@ -1856,6 +2406,12 @@ class $modify(AIEditorUI, EditorUI) {
         );
         acceptBtn->setID("accept-btn"_spr);
 
+        auto editBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Edit", "goldFont.fnt", "GJ_button_02.png", 0.7f),
+            this, menu_selector(AIEditorUI::onEditPreview)
+        );
+        editBtn->setID("edit-btn"_spr);
+
         auto denyBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("Deny", "goldFont.fnt", "GJ_button_06.png", 0.7f),
             this, menu_selector(AIEditorUI::onDenyPreview)
@@ -1864,15 +2420,40 @@ class $modify(AIEditorUI, EditorUI) {
 
         auto winSize = CCDirector::sharedDirector()->getWinSize();
         menu->setPosition({70.f, winSize.height - 50.f});
-        acceptBtn->setPosition({0.f, 15.f});
-        denyBtn->setPosition({0.f, -15.f});
+        acceptBtn->setPosition({0.f, 30.f});
+        editBtn->setPosition({0.f, 0.f});
+        denyBtn->setPosition({0.f, -30.f});
 
         menu->addChild(acceptBtn);
+        menu->addChild(editBtn);
         menu->addChild(denyBtn);
         this->addChild(menu, 1000);
 
         m_fields->m_previewButtonMenu = menu;
-        log::info("EditorAI: preview accept/deny buttons shown");
+        log::info("EditorAI: preview accept/deny/edit buttons shown");
+    }
+
+    void showDoneButton() {
+        removePreviewButtons();
+
+        auto menu = CCMenu::create();
+        menu->setID("ai-preview-menu"_spr);
+
+        auto doneBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Done", "goldFont.fnt", "GJ_button_01.png", 0.7f),
+            this, menu_selector(AIEditorUI::onDoneEditing)
+        );
+        doneBtn->setID("done-btn"_spr);
+
+        auto winSize = CCDirector::sharedDirector()->getWinSize();
+        menu->setPosition({70.f, winSize.height - 50.f});
+        doneBtn->setPosition({0.f, 0.f});
+
+        menu->addChild(doneBtn);
+        this->addChild(menu, 1000);
+
+        m_fields->m_previewButtonMenu = menu;
+        log::info("EditorAI: Done button shown for edit mode");
     }
 
     void removePreviewButtons() {
@@ -1885,6 +2466,45 @@ class $modify(AIEditorUI, EditorUI) {
     void onAcceptPreview(CCObject*) {
         log::info("EditorAI: accepting {} preview objects", s_previewObjects.size());
 
+        // Before accepting new objects, check if the user edited the PREVIOUS
+        // accepted generation — if so, update that feedback entry with edit info.
+        if (!s_acceptedSnapshot.empty() && m_editorLayer) {
+            auto editSummary = computeEditSummary(m_editorLayer);
+            if (!editSummary.empty()) {
+                log::info("EditorAI: detected user edits on previous generation: {}", editSummary);
+                // Update the most recent accepted feedback entry with the edit summary
+                auto entries = loadFeedback();
+                for (int i = (int)entries.size() - 1; i >= 0; --i) {
+                    if (entries[i].accepted && entries[i].prompt == s_snapshotPrompt) {
+                        entries[i].editSummary = editSummary;
+                        // Re-save the updated entries
+                        auto arr = matjson::Value::array();
+                        for (auto& e : entries) {
+                            auto obj = matjson::Value::object();
+                            obj["prompt"]     = e.prompt;
+                            obj["difficulty"] = e.difficulty;
+                            obj["style"]      = e.style;
+                            obj["length"]     = e.length;
+                            if (!e.feedback.empty())          obj["feedback"]          = e.feedback;
+                            if (!e.objectsJson.empty())       obj["objectsJson"]       = e.objectsJson;
+                            if (!e.editedObjectsJson.empty()) obj["editedObjectsJson"] = e.editedObjectsJson;
+                            if (!e.editSummary.empty())       obj["editSummary"]       = e.editSummary;
+                            obj["rating"]     = e.rating;
+                            obj["accepted"]   = e.accepted;
+                            arr.push(obj);
+                        }
+                        try {
+                            std::ofstream file(getFeedbackPath());
+                            file << arr.dump();
+                            log::info("Updated feedback entry with edit summary");
+                        } catch (...) {}
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Restore objects from ghost to solid
         for (size_t i = 0; i < s_previewObjects.size(); ++i) {
             if (GameObject* obj = s_previewObjects[i]) {
                 obj->setOpacity(255);
@@ -1895,6 +2515,22 @@ class $modify(AIEditorUI, EditorUI) {
                 );
             }
         }
+
+        // Snapshot the accepted objects for future edit tracking
+        s_acceptedSnapshot.clear();
+        for (auto& objRef : s_previewObjects) {
+            if (GameObject* obj = objRef) {
+                s_acceptedSnapshot.push_back({
+                    obj->m_objectID,
+                    obj->getPositionX(),
+                    obj->getPositionY()
+                });
+            }
+        }
+        s_snapshotPrompt     = s_lastUserPrompt;
+        s_snapshotDifficulty = s_lastDifficulty;
+        s_snapshotStyle      = s_lastStyle;
+        s_snapshotLength     = s_lastLength;
 
         s_previewObjects.clear();
         s_previewOriginalColors.clear();
@@ -1933,6 +2569,79 @@ class $modify(AIEditorUI, EditorUI) {
         s_lastWasAccepted = false;
         showRatingIfEnabled();
     }
+
+    void onEditPreview(CCObject*) {
+        log::info("EditorAI: entering edit mode for {} preview objects", s_previewObjects.size());
+
+        // Make objects solid and interactable so the user can edit them
+        for (size_t i = 0; i < s_previewObjects.size(); ++i) {
+            if (GameObject* obj = s_previewObjects[i]) {
+                obj->setOpacity(255);
+                obj->setColor(
+                    i < s_previewOriginalColors.size()
+                        ? s_previewOriginalColors[i]
+                        : ccColor3B{255, 255, 255}
+                );
+            }
+        }
+
+        // Snapshot positions BEFORE the user edits — this is the baseline
+        s_acceptedSnapshot.clear();
+        for (auto& objRef : s_previewObjects) {
+            if (GameObject* obj = objRef) {
+                s_acceptedSnapshot.push_back({
+                    obj->m_objectID,
+                    obj->getPositionX(),
+                    obj->getPositionY()
+                });
+            }
+        }
+        s_snapshotPrompt     = s_lastUserPrompt;
+        s_snapshotDifficulty = s_lastDifficulty;
+        s_snapshotStyle      = s_lastStyle;
+        s_snapshotLength     = s_lastLength;
+
+        s_previewObjects.clear();
+        s_previewOriginalColors.clear();
+        s_inPreviewMode = false;
+        s_inEditMode    = true;
+
+        // Replace Accept/Edit/Deny with Done
+        showDoneButton();
+
+        if (m_editorLayer && m_editorLayer->m_editorUI)
+            m_editorLayer->m_editorUI->updateButtons();
+
+        Notification::create("Edit the objects, then press Done.", NotificationIcon::Info)->show();
+    }
+
+    void onDoneEditing(CCObject*) {
+        log::info("EditorAI: done editing, computing edit summary");
+
+        s_inEditMode = false;
+        removePreviewButtons();
+
+        // Capture the edited objects and compute what changed
+        if (!s_acceptedSnapshot.empty() && m_editorLayer) {
+            s_lastEditedObjectsJson = captureEditedObjects(m_editorLayer);
+            s_lastEditSummary = computeEditSummary(m_editorLayer);
+            if (!s_lastEditSummary.empty())
+                log::info("EditorAI: user edits: {}", s_lastEditSummary);
+            if (!s_lastEditedObjectsJson.empty())
+                log::info("EditorAI: captured {} chars of edited objects", s_lastEditedObjectsJson.size());
+        } else {
+            s_lastEditedObjectsJson.clear();
+            s_lastEditSummary.clear();
+        }
+
+        if (m_editorLayer && m_editorLayer->m_editorUI)
+            m_editorLayer->m_editorUI->updateButtons();
+
+        Notification::create("Edits saved!", NotificationIcon::Success)->show();
+
+        s_lastWasAccepted = true;
+        showRatingIfEnabled();
+    }
 };
 
 // Bridge function: lets AIGeneratorPopup call showPreviewButtons() on EditorUI
@@ -1968,10 +2677,12 @@ class $modify(EditorPauseLayer) {
 
 class $modify(AILevelEditorLayer, LevelEditorLayer) {
     void onPlaytest() {
-        // Block playtest while ghost objects are awaiting accept/deny
-        if (s_inPreviewMode) {
+        // Block playtest while ghost objects are awaiting accept/deny/edit
+        if (s_inPreviewMode || s_inEditMode) {
             Notification::create(
-                "Accept or deny the AI preview first!",
+                s_inEditMode
+                    ? "Press Done to finish editing first!"
+                    : "Accept, edit, or deny the AI preview first!",
                 NotificationIcon::Warning
             )->show();
             return;

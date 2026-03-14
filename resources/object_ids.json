@@ -88,5 +88,18 @@
   "block_black_pillar_square": 96,
   "decor_very_small_decorative_gear": 97,
   "spike_small_black_sawblade": 98,
-  "portal_green_size_portal": 99
+  "portal_green_size_portal": 99,
+  "speed_portal_half": 200,
+  "speed_portal_normal": 201,
+  "speed_portal_double": 202,
+  "speed_portal_triple": 203,
+  "alpha_trigger": 1007,
+  "toggle_trigger": 1049,
+  "pulse_trigger": 1006,
+  "speed_portal_quadruple": 1334,
+  "rotate_trigger": 1346,
+  "hide_player_trigger": 1612,
+  "show_player_trigger": 1613,
+  "stop_trigger": 1616,
+  "spawn_trigger": 1268
 }

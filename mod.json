@@ -16,7 +16,7 @@
   },
   "incompatibilities": {
     "alk.editor-collab": {
-      "breaking": true,
+      "breaking": false,
       "version": "*"
     }
   },
