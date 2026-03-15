@@ -43,6 +43,8 @@
     "huggingface-api-key":      { "type": "string", "default": "" },
     "use-platinum":             { "type": "bool",   "default": false },
     "ollama-model":             { "type": "string", "default": "entity12208/editorai:deepseek" },
+    "local-url":                { "type": "string", "default": "http://localhost:11435" },
+    "local-model":              { "type": "string", "default": "editorai" },
     "ollama-timeout":           { "type": "int",    "default": 600, "min": 60, "max": 1800 },
     "enable-rate-limiting":     { "type": "bool",   "default": true },
     "rate-limit-seconds":       { "type": "int",    "default": 3,   "min": 1,  "max": 60 },
