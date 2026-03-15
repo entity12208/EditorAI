@@ -231,13 +231,29 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
             }
 
         } else if (statusCode >= 500) {
-            title   = "Service Error";
+            title   = fmt::format("Service Error (HTTP {})", statusCode);
             message = "The AI service is currently unavailable.\n\nPlease try again later.";
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+        } else if (statusCode == 0) {
+            title   = "Connection Failed";
+            message = "Could not reach the AI service.\n\n"
+                      "Check your internet connection. If using Ollama, make sure it's running "
+                      "(run 'ollama serve' in a terminal).";
         } else if (!errorMsg.empty()) {
+            title   = fmt::format("API Error (HTTP {})", statusCode);
             message = errorMsg.substr(0, 200);
             if (errorMsg.length() > 200) message += "...";
+        } else {
+            title   = fmt::format("API Error (HTTP {})", statusCode);
+            // Show truncated raw body for debugging
+            std::string body = errorBody.substr(0, 200);
+            if (errorBody.length() > 200) body += "...";
+            message = fmt::format("Unexpected error.\n\nHTTP {}\n\n{}", statusCode, body);
         }
-    } catch (...) {}
+    } catch (...) {
+        title   = fmt::format("API Error (HTTP {})", statusCode);
+        message = fmt::format("HTTP {} — {}", statusCode, errorBody.substr(0, 200));
+    }
     return {title, message};
 }
 
@@ -293,6 +309,20 @@ static void showPreviewButtonsOnEditorUI(EditorUI* ui);
 // ─── Feedback / rating persistence ──────────────────────────────────────────
 // Stores the last generation context so the rating popup (shown after
 // accept/deny) can save it alongside the user's 1-10 score.
+
+// ─── Prompt history ──────────────────────────────────────────────────────────
+static std::vector<std::string> s_promptHistory;
+static int s_promptHistoryIndex = -1;
+static constexpr int MAX_PROMPT_HISTORY = 20;
+
+static void addToPromptHistory(const std::string& prompt) {
+    // Don't add duplicates of the most recent entry
+    if (!s_promptHistory.empty() && s_promptHistory.back() == prompt) return;
+    s_promptHistory.push_back(prompt);
+    if ((int)s_promptHistory.size() > MAX_PROMPT_HISTORY)
+        s_promptHistory.erase(s_promptHistory.begin());
+    s_promptHistoryIndex = (int)s_promptHistory.size();  // past the end = "current"
+}
 
 static std::string s_lastUserPrompt;    // the raw prompt the user typed
 static std::string s_lastDifficulty;
@@ -745,6 +775,476 @@ public:
 // Forward declaration — defined after AIEditorUI
 static void showRatingIfEnabled();
 
+// ─── Settings popup ──────────────────────────────────────────────────────────
+
+enum class SettingsTab { General, Provider, Advanced };
+
+struct CyclerInfo {
+    std::string settingId;
+    std::vector<std::string> options;
+};
+static std::vector<CyclerInfo> s_cyclerInfos;
+
+struct IntInputMeta {
+    std::string settingId;
+    TextInput* input;
+    int64_t min, max, defaultVal;
+};
+
+class AISettingsPopup : public Popup {
+protected:
+    SettingsTab m_currentTab = SettingsTab::General;
+    CCNode*     m_contentLayer = nullptr;
+    std::vector<std::pair<std::string, TextInput*>> m_textInputs;
+    std::vector<IntInputMeta> m_intInputs;
+    std::vector<CCMenuItemSpriteExtra*> m_tabBtns;
+    async::TaskHolder<web::WebResponse> m_ollamaListener;
+    std::vector<std::string> m_ollamaModels;  // auto-detected
+
+    float m_rowY = 0;
+    float m_labelX = 0;
+    float m_valX = 0;
+
+    bool init() override {
+        if (!Popup::init(360.f, 260.f))
+            return false;
+
+        auto ws = this->m_size;
+        this->setTitle("AI Settings");
+
+        // Tab buttons across the top
+        auto tabMenu = CCMenu::create();
+        tabMenu->setPosition({ws.width / 2, ws.height / 2 + 85});
+
+        const char* tabNames[] = {"General", "Provider", "Advanced"};
+        for (int i = 0; i < 3; ++i) {
+            bool active = (i == (int)m_currentTab);
+            auto btn = CCMenuItemSpriteExtra::create(
+                ButtonSprite::create(tabNames[i], "bigFont.fnt",
+                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.4f),
+                this, menu_selector(AISettingsPopup::onTabSwitch)
+            );
+            btn->setTag(i);
+            btn->setPosition({(float)(i - 1) * 95.f, 0});
+            tabMenu->addChild(btn);
+            m_tabBtns.push_back(btn);
+        }
+        m_mainLayer->addChild(tabMenu);
+
+        // Content container
+        m_contentLayer = CCNode::create();
+        m_contentLayer->setPosition({0, 0});
+        m_mainLayer->addChild(m_contentLayer);
+
+        buildTab(m_currentTab);
+        return true;
+    }
+
+    void onClose(CCObject* obj) override {
+        saveTextInputs();
+        Popup::onClose(obj);
+    }
+
+    void saveTextInputs() {
+        for (auto& [sid, input] : m_textInputs) {
+            Mod::get()->setSettingValue<std::string>(sid, std::string(input->getString()));
+        }
+        for (auto& meta : m_intInputs) {
+            std::string val = meta.input->getString();
+            int64_t num = val.empty() ? meta.defaultVal : 0;
+            if (!val.empty()) {
+                try { num = std::stoll(val); }
+                catch (...) { num = meta.defaultVal; }
+            }
+            num = std::clamp(num, meta.min, meta.max);
+            Mod::get()->setSettingValue<int64_t>(meta.settingId, num);
+        }
+    }
+
+    // ── Tab management ──────────────────────────────────────────────────
+
+    void onTabSwitch(CCObject* sender) {
+        saveTextInputs();  // save current tab's inputs before switching
+        int tag = static_cast<CCNode*>(sender)->getTag();
+        m_currentTab = (SettingsTab)tag;
+
+        // Update tab button appearance
+        const char* tabNames[] = {"General", "Provider", "Advanced"};
+        for (int i = 0; i < (int)m_tabBtns.size(); ++i) {
+            bool active = (i == tag);
+            auto parent = m_tabBtns[i]->getParent();
+            auto pos = m_tabBtns[i]->getPosition();
+            parent->removeChild(m_tabBtns[i], true);
+            auto newBtn = CCMenuItemSpriteExtra::create(
+                ButtonSprite::create(tabNames[i], "bigFont.fnt",
+                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.4f),
+                this, menu_selector(AISettingsPopup::onTabSwitch)
+            );
+            newBtn->setTag(i);
+            newBtn->setPosition(pos);
+            parent->addChild(newBtn);
+            m_tabBtns[i] = newBtn;
+        }
+
+        buildTab(m_currentTab);
+    }
+
+    void buildTab(SettingsTab tab) {
+        m_contentLayer->removeAllChildren();
+        s_cyclerInfos.clear();
+        m_textInputs.clear();
+        m_intInputs.clear();
+
+        auto ws = this->m_size;
+        m_rowY = ws.height / 2 + 60;
+        m_labelX = ws.width / 2 - 60;
+        m_valX = ws.width / 2 + 60;
+
+        switch (tab) {
+            case SettingsTab::General:  buildGeneralTab(); break;
+            case SettingsTab::Provider: buildProviderTab(); break;
+            case SettingsTab::Advanced: buildAdvancedTab(); break;
+        }
+    }
+
+    // ── Row helpers ─────────────────────────────────────────────────────
+
+    void addRowLabel(const char* text) {
+        auto lbl = CCLabelBMFont::create(text, "bigFont.fnt");
+        lbl->setScale(0.3f);
+        lbl->setAnchorPoint({1, 0.5f});
+        lbl->setPosition({m_labelX, m_rowY});
+        m_contentLayer->addChild(lbl);
+    }
+
+    void addCycler(const char* label, const char* settingId,
+                    std::vector<std::string> options) {
+        addRowLabel(label);
+        std::string current = Mod::get()->getSettingValue<std::string>(settingId);
+        auto btn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create(current.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.4f),
+            this, menu_selector(AISettingsPopup::onCycleSetting)
+        );
+        int idx = (int)s_cyclerInfos.size();
+        btn->setTag(idx);
+        s_cyclerInfos.push_back({settingId, std::move(options)});
+
+        auto menu = CCMenu::create();
+        menu->setPosition({m_valX, m_rowY});
+        btn->setPosition({0, 0});
+        menu->addChild(btn);
+        m_contentLayer->addChild(menu);
+        m_rowY -= 30;
+    }
+
+    void addToggle(const char* label, const char* settingId) {
+        addRowLabel(label);
+        bool val = Mod::get()->getSettingValue<bool>(settingId);
+        auto btn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create(val ? "ON" : "OFF", "bigFont.fnt",
+                val ? "GJ_button_01.png" : "GJ_button_06.png", 0.4f),
+            this, menu_selector(AISettingsPopup::onCycleToggle)
+        );
+        int idx = (int)s_cyclerInfos.size();
+        btn->setTag(idx);
+        s_cyclerInfos.push_back({settingId, {"false", "true"}});
+
+        auto menu = CCMenu::create();
+        menu->setPosition({m_valX, m_rowY});
+        btn->setPosition({0, 0});
+        menu->addChild(btn);
+        m_contentLayer->addChild(menu);
+        m_rowY -= 30;
+    }
+
+    void addTextRow(const char* label, const char* settingId, const char* placeholder, int maxChars = 100) {
+        addRowLabel(label);
+
+        auto bg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
+        bg->setContentSize({155, 22});
+        bg->setColor({0, 0, 0});
+        bg->setOpacity(100);
+        bg->setPosition({m_valX, m_rowY});
+        m_contentLayer->addChild(bg);
+
+        std::string current = Mod::get()->getSettingValue<std::string>(settingId);
+        auto input = TextInput::create(145, placeholder, "bigFont.fnt");
+        input->setPosition({m_valX, m_rowY});
+        input->setScale(0.45f);
+        input->setMaxCharCount(maxChars);
+        if (!current.empty()) input->setString(current);
+        m_contentLayer->addChild(input);
+        m_textInputs.push_back({settingId, input});
+        m_rowY -= 30;
+    }
+
+    void addIntRow(const char* label, const char* settingId, int64_t min, int64_t max, int64_t def) {
+        addRowLabel(label);
+
+        auto bg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
+        bg->setContentSize({80, 22});
+        bg->setColor({0, 0, 0});
+        bg->setOpacity(100);
+        bg->setPosition({m_valX - 20, m_rowY});
+        m_contentLayer->addChild(bg);
+
+        int64_t current = Mod::get()->getSettingValue<int64_t>(settingId);
+        auto input = TextInput::create(70, fmt::format("{}", def).c_str(), "bigFont.fnt");
+        input->setPosition({m_valX - 20, m_rowY});
+        input->setScale(0.45f);
+        input->setMaxCharCount(6);
+        input->getInputNode()->setAllowedChars("0123456789");
+        input->setString(fmt::format("{}", current));
+        m_contentLayer->addChild(input);
+        m_intInputs.push_back({settingId, input, min, max, def});
+
+        // Range hint
+        auto hint = CCLabelBMFont::create(
+            fmt::format("{}-{}", min, max).c_str(), "bigFont.fnt");
+        hint->setScale(0.18f);
+        hint->setColor({150, 150, 150});
+        hint->setPosition({m_valX + 45, m_rowY});
+        m_contentLayer->addChild(hint);
+
+        m_rowY -= 30;
+    }
+
+    void addInfoRow(const char* label, const std::string& value, ccColor3B color) {
+        addRowLabel(label);
+        auto lbl = CCLabelBMFont::create(value.c_str(), "bigFont.fnt");
+        lbl->setScale(0.25f);
+        lbl->setColor(color);
+        lbl->setPosition({m_valX, m_rowY});
+        m_contentLayer->addChild(lbl);
+        m_rowY -= 30;
+    }
+
+    // ── Tab builders ────────────────────────────────────────────────────
+
+    void buildGeneralTab() {
+        addCycler("Provider:", "ai-provider",
+            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama"});
+        addCycler("Difficulty:", "difficulty",
+            {"easy", "medium", "hard", "extreme"});
+        addCycler("Style:", "style",
+            {"modern", "retro", "minimalist", "decorated"});
+        addCycler("Length:", "length",
+            {"short", "medium", "long", "xl", "xxl"});
+        addIntRow("Max Objects:", "max-objects", 10, 10000, 500);
+        addIntRow("Spawn Speed:", "spawn-batch-size", 1, 100, 8);
+    }
+
+    void buildProviderTab() {
+        std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+
+        addInfoRow("Provider:", provider, {100, 255, 100});
+
+        if (provider == "gemini") {
+            addCycler("Model:", "gemini-model",
+                {"gemini-2.5-flash", "gemini-2.5-pro"});
+            addTextRow("API Key:", "gemini-api-key", "Your Google AI Studio key", 200);
+        } else if (provider == "claude") {
+            addCycler("Model:", "claude-model",
+                {"claude-sonnet-4-6", "claude-opus-4-6"});
+            addTextRow("API Key:", "claude-api-key", "Your Anthropic key", 200);
+        } else if (provider == "openai") {
+            addCycler("Model:", "openai-model",
+                {"gpt-4o", "gpt-4.1-mini"});
+            addTextRow("API Key:", "openai-api-key", "Your OpenAI key", 200);
+        } else if (provider == "ministral") {
+            addCycler("Model:", "ministral-model",
+                {"ministral-3b-latest", "ministral-8b-latest", "mistral-small-latest",
+                 "mistral-medium-latest", "mistral-large-latest"});
+            addTextRow("API Key:", "ministral-api-key", "Your Mistral AI key", 200);
+        } else if (provider == "huggingface") {
+            addTextRow("Model:", "huggingface-model", "e.g. meta-llama/Llama-3.1-8B", 200);
+            addTextRow("API Key:", "huggingface-api-key", "Your HuggingFace token", 200);
+        } else if (provider == "ollama") {
+            addToggle("Platinum:", "use-platinum");
+
+            // Both Platinum and local use auto-detect from their respective URLs
+            if (m_ollamaModels.empty()) {
+                addInfoRow("Models:", "Detecting...", {200, 200, 100});
+                fetchOllamaModels();
+            } else if (m_ollamaModels.size() == 1 && m_ollamaModels[0].rfind("(", 0) == 0) {
+                // Error state — show red message
+                addInfoRow("Models:", m_ollamaModels[0], {255, 100, 100});
+            } else {
+                addCycler("Model:", "ollama-model", m_ollamaModels);
+            }
+
+            addIntRow("Timeout (s):", "ollama-timeout", 60, 1800, 600);
+        }
+
+        // Hint about key security
+        if (provider != "ollama") {
+            auto hint = CCLabelBMFont::create("Keys stored locally in Geode save data.", "bigFont.fnt");
+            hint->setScale(0.2f);
+            hint->setColor({150, 150, 150});
+            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
+            m_contentLayer->addChild(hint);
+        }
+    }
+
+    void buildAdvancedTab() {
+        addToggle("Triggers/Colors:", "enable-advanced-features");
+        addToggle("Rate Limiting:", "enable-rate-limiting");
+        addIntRow("Rate Limit (s):", "rate-limit-seconds", 1, 60, 3);
+        addToggle("Rate Generations:", "enable-rating");
+        addIntRow("Feedback Examples:", "max-feedback-examples", 1, 10, 3);
+    }
+
+    // ── Ollama auto-detect ──────────────────────────────────────────────
+
+    void fetchOllamaModels() {
+        std::string ollamaUrl = getOllamaUrl();
+        bool isPlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
+        log::info("Fetching models from {}/api/tags (platinum={})", ollamaUrl, isPlatinum);
+
+        auto request = web::WebRequest();
+        request.timeout(std::chrono::seconds(isPlatinum ? 10 : 5));
+
+        m_ollamaListener.spawn(
+            request.get(ollamaUrl + "/api/tags"),
+            [this, isPlatinum](web::WebResponse response) {
+                if (!response.ok()) {
+                    int code = response.code();
+                    log::warn("Failed to fetch models: HTTP {}", code);
+                    if (isPlatinum) {
+                        m_ollamaModels = {"(Platinum unavailable)"};
+                        Notification::create(
+                            "Platinum service is not available right now.",
+                            NotificationIcon::Error
+                        )->show();
+                    } else {
+                        m_ollamaModels = code == 0
+                            ? std::vector<std::string>{"(Ollama not running)"}
+                            : std::vector<std::string>{fmt::format("(error: HTTP {})", code)};
+                    }
+                    buildTab(SettingsTab::Provider);
+                    return;
+                }
+
+                auto jsonRes = response.json();
+                if (!jsonRes) {
+                    m_ollamaModels = {"(invalid response)"};
+                    buildTab(SettingsTab::Provider);
+                    return;
+                }
+
+                auto json = jsonRes.unwrap();
+                m_ollamaModels.clear();
+
+                if (json.contains("models") && json["models"].isArray()) {
+                    for (size_t i = 0; i < json["models"].size(); ++i) {
+                        auto nameResult = json["models"][i]["name"].asString();
+                        if (nameResult)
+                            m_ollamaModels.push_back(nameResult.unwrap());
+                    }
+                }
+
+                if (m_ollamaModels.empty()) {
+                    if (isPlatinum) {
+                        m_ollamaModels = {"(no Platinum models available)"};
+                        Notification::create(
+                            "No models on Platinum. Service may be down.",
+                            NotificationIcon::Error
+                        )->show();
+                    } else {
+                        m_ollamaModels = {"(no models installed)"};
+                    }
+                }
+
+                log::info("Detected {} models from {}", m_ollamaModels.size(),
+                    isPlatinum ? "Platinum" : "local Ollama");
+                buildTab(SettingsTab::Provider);
+            }
+        );
+    }
+
+    // ── Cycler callbacks ────────────────────────────────────────────────
+
+    void onCycleSetting(CCObject* sender) {
+        auto btn = static_cast<CCMenuItemSpriteExtra*>(sender);
+        int idx = btn->getTag();
+        if (idx < 0 || idx >= (int)s_cyclerInfos.size()) return;
+
+        auto& info = s_cyclerInfos[idx];
+        std::string current = Mod::get()->getSettingValue<std::string>(info.settingId);
+
+        int curIdx = 0;
+        for (int i = 0; i < (int)info.options.size(); ++i) {
+            if (info.options[i] == current) { curIdx = i; break; }
+        }
+        int nextIdx = (curIdx + 1) % (int)info.options.size();
+        std::string next = info.options[nextIdx];
+
+        Mod::get()->setSettingValue(info.settingId, next);
+
+        auto parent = btn->getParent();
+        auto pos = btn->getPosition();
+        parent->removeChild(btn, true);
+
+        auto newBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create(next.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.4f),
+            this, menu_selector(AISettingsPopup::onCycleSetting)
+        );
+        newBtn->setTag(idx);
+        newBtn->setPosition(pos);
+        parent->addChild(newBtn);
+
+        // If provider changed, rebuild Provider tab data
+        if (info.settingId == "ai-provider" && m_currentTab == SettingsTab::Provider) {
+            m_ollamaModels.clear();
+            buildTab(SettingsTab::Provider);
+        }
+
+        log::info("Setting {} -> {}", info.settingId, next);
+    }
+
+    void onCycleToggle(CCObject* sender) {
+        auto btn = static_cast<CCMenuItemSpriteExtra*>(sender);
+        int idx = btn->getTag();
+        if (idx < 0 || idx >= (int)s_cyclerInfos.size()) return;
+
+        auto& info = s_cyclerInfos[idx];
+        bool current = Mod::get()->getSettingValue<bool>(info.settingId);
+        bool next = !current;
+
+        Mod::get()->setSettingValue(info.settingId, next);
+
+        // If use-platinum changed, rebuild provider tab to show different model list
+        if (info.settingId == "use-platinum") {
+            m_ollamaModels.clear();  // force re-detect if switching off platinum
+            buildTab(SettingsTab::Provider);
+            return;
+        }
+
+        auto parent = btn->getParent();
+        auto pos = btn->getPosition();
+        parent->removeChild(btn, true);
+
+        auto newBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create(next ? "ON" : "OFF", "bigFont.fnt",
+                next ? "GJ_button_01.png" : "GJ_button_06.png", 0.4f),
+            this, menu_selector(AISettingsPopup::onCycleToggle)
+        );
+        newBtn->setTag(idx);
+        newBtn->setPosition(pos);
+        parent->addChild(newBtn);
+
+        log::info("Setting {} -> {}", info.settingId, next);
+    }
+
+public:
+    static AISettingsPopup* create() {
+        auto ret = new AISettingsPopup();
+        if (ret->init()) { ret->autorelease(); return ret; }
+        delete ret;
+        return nullptr;
+    }
+};
+
 // ─── Main generation popup ────────────────────────────────────────────────────
 
 class AIGeneratorPopup : public Popup {
@@ -753,10 +1253,11 @@ protected:
     CCLabelBMFont*           m_statusLabel    = nullptr;
     LoadingCircle*           m_loadingCircle  = nullptr;
     CCMenuItemSpriteExtra*   m_generateBtn    = nullptr;
+    CCMenuItemSpriteExtra*   m_cancelBtn      = nullptr;
     CCMenuItemToggler*       m_clearToggle    = nullptr;
 
-    // Default to false — clearing is destructive and must be explicitly opted into.
     bool                     m_shouldClearLevel = false;
+    bool                     m_isGenerating     = false;
 
     LevelEditorLayer*        m_editorLayer    = nullptr;
 
@@ -765,6 +1266,7 @@ protected:
     std::vector<DeferredObject> m_deferredObjects;
     size_t m_currentObjectIndex = 0;
     bool   m_isCreatingObjects  = false;
+    std::chrono::steady_clock::time_point m_generationStartTime;
 
     // ── init ──────────────────────────────────────────────────────────────────
 
@@ -782,13 +1284,13 @@ protected:
         m_mainLayer->addChild(descLabel);
 
         auto inputBG = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
-        inputBG->setContentSize({360, 100});
+        inputBG->setContentSize({330, 100});
         inputBG->setColor({0, 0, 0});
         inputBG->setOpacity(100);
         inputBG->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_mainLayer->addChild(inputBG);
 
-        m_promptInput = TextInput::create(350, "e.g. Medium difficulty platforming", "bigFont.fnt");
+        m_promptInput = TextInput::create(320, "e.g. Medium difficulty platforming", "bigFont.fnt");
         m_promptInput->setPosition({winSize.width / 2, winSize.height / 2 + 15});
         m_promptInput->setScale(0.65f);
         m_promptInput->setMaxCharCount(200);
@@ -798,6 +1300,27 @@ protected:
             "0123456789-_=+/\\.,;:!@#$%^&*()[]{}|<>?`~'\" "
         );
         m_mainLayer->addChild(m_promptInput);
+
+        // Prompt history arrows (left of input)
+        auto historyMenu = CCMenu::create();
+        historyMenu->setPosition({winSize.width / 2 + 180, winSize.height / 2 + 15});
+
+        auto upArrow = CCMenuItemSpriteExtra::create(
+            []{ auto s = CCSprite::createWithSpriteFrameName("navArrowBtn_001.png");
+                s->setScale(0.35f); s->setRotation(-90); return s; }(),
+            this, menu_selector(AIGeneratorPopup::onHistoryUp)
+        );
+        upArrow->setPosition({0, 15});
+        historyMenu->addChild(upArrow);
+
+        auto downArrow = CCMenuItemSpriteExtra::create(
+            []{ auto s = CCSprite::createWithSpriteFrameName("navArrowBtn_001.png");
+                s->setScale(0.35f); s->setRotation(90); return s; }(),
+            this, menu_selector(AIGeneratorPopup::onHistoryDown)
+        );
+        downArrow->setPosition({0, -15});
+        historyMenu->addChild(downArrow);
+        m_mainLayer->addChild(historyMenu);
 
         // Clear-level toggle — default OFF
         auto clearLabel = CCLabelBMFont::create("Clear level before generating", "bigFont.fnt");
@@ -821,32 +1344,52 @@ protected:
         m_mainLayer->addChild(toggleMenu);
 
         m_statusLabel = CCLabelBMFont::create("", "bigFont.fnt");
-        m_statusLabel->setScale(0.4f);
-        m_statusLabel->setPosition({winSize.width / 2, winSize.height / 2 - 60});
+        m_statusLabel->setScale(0.35f);
+        m_statusLabel->setPosition({winSize.width / 2, winSize.height / 2 - 55});
         m_statusLabel->setVisible(false);
         m_mainLayer->addChild(m_statusLabel);
+
+        // Generate + Cancel buttons
+        auto btnMenu = CCMenu::create();
+        btnMenu->setPosition({winSize.width / 2, winSize.height / 2 - 90});
 
         m_generateBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create("Generate", "goldFont.fnt", "GJ_button_01.png", 0.8f),
             this, menu_selector(AIGeneratorPopup::onGenerate)
         );
-        auto btnMenu = CCMenu::create();
-        btnMenu->setPosition({winSize.width / 2, winSize.height / 2 - 95});
         m_generateBtn->setPosition({0, 0});
         btnMenu->addChild(m_generateBtn);
+
+        m_cancelBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("Cancel", "goldFont.fnt", "GJ_button_06.png", 0.7f),
+            this, menu_selector(AIGeneratorPopup::onCancel)
+        );
+        m_cancelBtn->setPosition({0, 0});
+        m_cancelBtn->setVisible(false);
+        btnMenu->addChild(m_cancelBtn);
         m_mainLayer->addChild(btnMenu);
 
-        // Info button only (lock icon removed — keys are now in settings)
+        // Top-right: info button
+        auto cornerMenu = CCMenu::create();
+        cornerMenu->setPosition({winSize.width - 25, winSize.height - 25});
         auto infoBtn = CCMenuItemSpriteExtra::create(
             []{ auto s = CCSprite::createWithSpriteFrameName("GJ_infoIcon_001.png"); s->setScale(0.7f); return s; }(),
             this, menu_selector(AIGeneratorPopup::onInfo)
         );
-
-        auto cornerMenu = CCMenu::create();
-        cornerMenu->setPosition({winSize.width - 25, winSize.height - 25});
         infoBtn->setPosition({0, 0});
         cornerMenu->addChild(infoBtn);
         m_mainLayer->addChild(cornerMenu);
+
+        // Top-left: settings button
+        auto settingsMenu = CCMenu::create();
+        settingsMenu->setPosition({25, winSize.height - 25});
+        auto settingsBtn = CCMenuItemSpriteExtra::create(
+            []{ auto s = CCSprite::createWithSpriteFrameName("GJ_optionsBtn_001.png"); s->setScale(0.4f); return s; }(),
+            this, menu_selector(AIGeneratorPopup::onSettings)
+        );
+        settingsBtn->setPosition({0, 0});
+        settingsMenu->addChild(settingsBtn);
+        m_mainLayer->addChild(settingsMenu);
 
         this->schedule(schedule_selector(AIGeneratorPopup::updateObjectCreation), 0.05f);
 
@@ -859,6 +1402,41 @@ protected:
         m_shouldClearLevel = !m_shouldClearLevel;
         log::info("Clear level toggle: {}", m_shouldClearLevel ? "ON" : "OFF");
     }
+
+    void onCancel(CCObject*) {
+        if (!m_isGenerating) return;
+        m_listener = {};  // destroy the task holder, cancelling the request
+        m_isGenerating = false;
+        if (m_loadingCircle) {
+            m_loadingCircle->fadeAndRemove();
+            m_loadingCircle = nullptr;
+        }
+        m_generateBtn->setVisible(true);
+        m_generateBtn->setEnabled(true);
+        m_cancelBtn->setVisible(false);
+        showStatus("Cancelled.", true);
+        log::info("EditorAI: generation cancelled by user");
+    }
+
+    void onHistoryUp(CCObject*) {
+        if (s_promptHistory.empty()) return;
+        if (s_promptHistoryIndex <= 0) return;
+        --s_promptHistoryIndex;
+        m_promptInput->setString(s_promptHistory[s_promptHistoryIndex]);
+    }
+
+    void onHistoryDown(CCObject*) {
+        if (s_promptHistory.empty()) return;
+        if (s_promptHistoryIndex >= (int)s_promptHistory.size() - 1) {
+            s_promptHistoryIndex = (int)s_promptHistory.size();
+            m_promptInput->setString("");
+            return;
+        }
+        ++s_promptHistoryIndex;
+        m_promptInput->setString(s_promptHistory[s_promptHistoryIndex]);
+    }
+
+    void onSettings(CCObject*);  // defined after AISettingsPopup class
 
     void onInfo(CCObject*) {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
@@ -900,6 +1478,16 @@ protected:
         m_statusLabel->setString(msg.c_str());
         m_statusLabel->setColor(error ? ccColor3B{255, 100, 100} : ccColor3B{100, 255, 100});
         m_statusLabel->setVisible(true);
+    }
+
+    void updateGenerationTimer(float) {
+        if (!m_isGenerating) {
+            this->unschedule(schedule_selector(AIGeneratorPopup::updateGenerationTimer));
+            return;
+        }
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - m_generationStartTime).count();
+        showStatus(fmt::format("AI is generating... ({}s)", elapsed));
     }
 
     // ── Level manipulation ────────────────────────────────────────────────────
@@ -1726,56 +2314,67 @@ protected:
         // Inject user feedback as few-shot learning context.
         // Examples are prioritized by similarity to the current request
         // (matching difficulty/style/length), then by rating.
+        // Guard: cap total feedback injection at ~8000 chars (~2000 tokens)
+        // to avoid blowing up context windows on smaller models.
         if (Mod::get()->getSettingValue<bool>("enable-rating")) {
             int maxExamples = (int)Mod::get()->getSettingValue<int64_t>("max-feedback-examples");
             auto curDiff  = s_lastDifficulty;
             auto curStyle = s_lastStyle;
             auto curLen   = s_lastLength;
 
-            // Positive examples — what the user liked, with actual output
+            constexpr size_t FEEDBACK_CHAR_BUDGET = 8000;
+            std::string feedbackSection;
+
+            auto appendFeedback = [&](const FeedbackEntry& fb, bool isPositive) {
+                std::string entry;
+                if (isPositive) {
+                    entry += fmt::format(
+                        "  + (rated {}/10) prompt=\"{}\" difficulty={} style={} length={}",
+                        fb.rating, fb.prompt, fb.difficulty, fb.style, fb.length);
+                } else {
+                    entry += fmt::format(
+                        "  - (rated {}/10) prompt=\"{}\"", fb.rating, fb.prompt);
+                }
+                if (!fb.feedback.empty())
+                    entry += fmt::format(" — user {}: \"{}\"",
+                        isPositive ? "said" : "complaint", fb.feedback);
+                entry += "\n";
+                if (!fb.objectsJson.empty())
+                    entry += fmt::format("    AI generated: {}\n", fb.objectsJson);
+                if (!fb.editedObjectsJson.empty())
+                    entry += fmt::format("    user corrected to: {}\n", fb.editedObjectsJson);
+                else if (!fb.editSummary.empty())
+                    entry += fmt::format("    user edits: {}\n", fb.editSummary);
+
+                // Budget check: skip this entry if it would exceed the limit
+                if (feedbackSection.size() + entry.size() > FEEDBACK_CHAR_BUDGET) {
+                    log::info("Feedback budget exhausted ({} chars), skipping remaining examples",
+                        feedbackSection.size());
+                    return false;
+                }
+                feedbackSection += entry;
+                return true;
+            };
+
+            // Positive examples
             auto topFeedback = getTopFeedback(maxExamples, curDiff, curStyle, curLen);
             if (!topFeedback.empty()) {
-                base += "\n\nUSER LIKES — The user rated these past generations highly. "
-                        "Study the actual output and match this style and quality:\n";
-                for (auto& fb : topFeedback) {
-                    base += fmt::format(
-                        "  + (rated {}/10) prompt=\"{}\" difficulty={} style={} length={}",
-                        fb.rating, fb.prompt, fb.difficulty, fb.style, fb.length
-                    );
-                    if (!fb.feedback.empty())
-                        base += fmt::format(" — user said: \"{}\"", fb.feedback);
-                    base += "\n";
-                    // Include the actual objects JSON so the model can learn from it
-                    if (!fb.objectsJson.empty())
-                        base += fmt::format("    AI generated: {}\n", fb.objectsJson);
-                    if (!fb.editedObjectsJson.empty())
-                        base += fmt::format("    user corrected to: {}\n", fb.editedObjectsJson);
-                    else if (!fb.editSummary.empty())
-                        base += fmt::format("    user edits: {} (learn from what they kept)\n", fb.editSummary);
-                }
+                feedbackSection += "\n\nUSER LIKES — The user rated these past generations highly. "
+                    "Study the actual output and match this style and quality:\n";
+                for (auto& fb : topFeedback)
+                    if (!appendFeedback(fb, true)) break;
             }
 
-            // Negative examples — what to avoid, with actual output
+            // Negative examples
             auto bottomFeedback = getBottomFeedback(maxExamples, curDiff, curStyle, curLen);
             if (!bottomFeedback.empty()) {
-                base += "\n\nUSER DISLIKES — The user rated these poorly. "
-                        "AVOID reproducing these patterns:\n";
-                for (auto& fb : bottomFeedback) {
-                    base += fmt::format(
-                        "  - (rated {}/10) prompt=\"{}\"",
-                        fb.rating, fb.prompt
-                    );
-                    if (!fb.feedback.empty())
-                        base += fmt::format(" — user complaint: \"{}\"", fb.feedback);
-                    base += "\n";
-                    if (!fb.objectsJson.empty())
-                        base += fmt::format("    AI generated: {}\n", fb.objectsJson);
-                    if (!fb.editedObjectsJson.empty())
-                        base += fmt::format("    user corrected to: {}\n", fb.editedObjectsJson);
-                    else if (!fb.editSummary.empty())
-                        base += fmt::format("    user edits: {} (these objects were problematic)\n", fb.editSummary);
-                }
+                feedbackSection += "\n\nUSER DISLIKES — The user rated these poorly. "
+                    "AVOID reproducing these patterns:\n";
+                for (auto& fb : bottomFeedback)
+                    if (!appendFeedback(fb, false)) break;
             }
+
+            base += feedbackSection;
         }
 
         return base;
@@ -1988,8 +2587,9 @@ protected:
         } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
         } else if (provider == "ollama") {
-            // Ollama can be slow on large models; give it generous time.
-            request.timeout(std::chrono::seconds(300));
+            // Ollama can be very slow on large models with partial GPU offload.
+            int timeoutSec = (int)Mod::get()->getSettingValue<int64_t>("ollama-timeout");
+            request.timeout(std::chrono::seconds(timeoutSec));
         }
 
         request.bodyString(jsonBody);
@@ -2019,16 +2619,21 @@ protected:
             lastRequestTime = now;
         }
 
-        m_generateBtn->setEnabled(false);
+        m_isGenerating = true;
+        m_generateBtn->setVisible(false);
+        m_cancelBtn->setVisible(true);
 
         m_loadingCircle = LoadingCircle::create();
         m_loadingCircle->setParentLayer(m_mainLayer);
         m_loadingCircle->show();
         m_loadingCircle->setPosition(m_mainLayer->getContentSize() / 2);
 
-        showStatus("AI is thinking...");
+        m_generationStartTime = std::chrono::steady_clock::now();
+        showStatus("AI is generating...");
+        this->schedule(schedule_selector(AIGeneratorPopup::updateGenerationTimer), 1.0f);
         log::info("=== Generation Request === Prompt: {}", prompt);
 
+        addToPromptHistory(prompt);
         callAPI(prompt, apiKey);
     }
 
@@ -2073,6 +2678,10 @@ protected:
     // ── API response handler ──────────────────────────────────────────────────
 
     void onAPISuccess(web::WebResponse response, const std::string& provider) {
+        m_isGenerating = false;
+        m_cancelBtn->setVisible(false);
+        m_generateBtn->setVisible(true);
+
         if (m_loadingCircle) {
             m_loadingCircle->fadeAndRemove();
             m_loadingCircle = nullptr;
@@ -2304,6 +2913,9 @@ protected:
     }
 
     void onError(const std::string& title, const std::string& message) {
+        m_isGenerating = false;
+        m_cancelBtn->setVisible(false);
+        m_generateBtn->setVisible(true);
         if (m_loadingCircle) {
             m_loadingCircle->fadeAndRemove();
             m_loadingCircle = nullptr;
@@ -2324,6 +2936,11 @@ public:
         return nullptr;
     }
 };
+
+// Out-of-line definition — AISettingsPopup is defined before AIGeneratorPopup
+void AIGeneratorPopup::onSettings(CCObject*) {
+    AISettingsPopup::create()->show();
+}
 
 // ─── EditorUI hook — mounts AI button onto "editor-buttons-menu" ─────────────
 
@@ -2549,10 +3166,23 @@ class $modify(AIEditorUI, EditorUI) {
     void onDenyPreview(CCObject*) {
         log::info("EditorAI: denying {} preview objects", s_previewObjects.size());
 
-        for (auto& objRef : s_previewObjects) {
-            if (GameObject* obj = objRef) {
-                if (m_editorLayer)
-                    m_editorLayer->removeObject(obj, true);
+        if (m_editorLayer) {
+            for (auto& objRef : s_previewObjects) {
+                if (GameObject* obj = objRef) {
+                    try {
+                        // Check the object is still in the editor's object array
+                        // before attempting removal (prevents crash if already gone)
+                        if (obj->getParent() && m_editorLayer->m_objects &&
+                            m_editorLayer->m_objects->containsObject(obj)) {
+                            m_editorLayer->removeObject(obj, true);
+                        } else {
+                            // Object not in editor — just detach from scene graph
+                            obj->removeFromParentAndCleanup(true);
+                        }
+                    } catch (...) {
+                        log::warn("Failed to remove preview object, skipping");
+                    }
+                }
             }
         }
 

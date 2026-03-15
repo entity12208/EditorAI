@@ -21,235 +21,34 @@
     }
   },
   "settings": {
-
-    "ai-provider": {
-      "type": "string",
-      "name": "AI Provider",
-      "description": "Which AI service to use. Configure the corresponding section below for your chosen provider.",
-      "default": "gemini",
-      "one-of": ["gemini", "claude", "openai", "ministral", "huggingface", "ollama"]
-    },
-
-    "general-section": {
+    "info-setting": {
       "type": "title",
-      "name": "General"
+      "name": "All settings are configured in-game via the gear icon in the AI popup."
     },
-    "difficulty": {
-      "type": "string",
-      "name": "Difficulty",
-      "description": "Default difficulty level for generated levels",
-      "default": "medium",
-      "one-of": ["easy", "medium", "hard", "extreme"]
-    },
-    "style": {
-      "type": "string",
-      "name": "Style",
-      "description": "Visual style preference for generated levels",
-      "default": "modern",
-      "one-of": ["modern", "retro", "minimalist", "decorated"]
-    },
-    "length": {
-      "type": "string",
-      "name": "Length",
-      "description": "Approximate level length",
-      "default": "medium",
-      "one-of": ["short", "medium", "long", "xl", "xxl"]
-    },
-    "max-objects": {
-      "type": "int",
-      "name": "Max Objects",
-      "description": "Maximum number of objects the AI may place per generation",
-      "default": 500,
-      "min": 10,
-      "max": 10000
-    },
-    "spawn-batch-size": {
-      "type": "int",
-      "name": "Spawn Speed (Objects/Tick)",
-      "description": "How many objects to place per tick after generation. Higher = faster but may cause brief lag on large levels. 8 is a good balance.",
-      "default": 8,
-      "min": 1,
-      "max": 100
-    },
-
-    "gemini-section": {
-      "type": "title",
-      "name": "Gemini"
-    },
-    "gemini-model": {
-      "type": "string",
-      "name": "Gemini Model",
-      "description": "Google Gemini model to use when AI Provider is set to 'gemini'",
-      "default": "gemini-2.5-flash",
-      "one-of": [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro"
-      ]
-    },
-    "gemini-api-key": {
-      "type": "string",
-      "name": "Gemini API Key",
-      "description": "Your Google AI Studio API key",
-      "default": ""
-    },
-
-    "claude-section": {
-      "type": "title",
-      "name": "Claude"
-    },
-    "claude-model": {
-      "type": "string",
-      "name": "Claude Model",
-      "description": "Anthropic Claude model to use when AI Provider is set to 'claude'",
-      "default": "claude-sonnet-4-6",
-      "one-of": [
-        "claude-sonnet-4-6",
-        "claude-opus-4-6"
-      ]
-    },
-    "claude-api-key": {
-      "type": "string",
-      "name": "Claude API Key",
-      "description": "Your Anthropic API key",
-      "default": ""
-    },
-
-    "openai-section": {
-      "type": "title",
-      "name": "OpenAI"
-    },
-    "openai-model": {
-      "type": "string",
-      "name": "OpenAI Model",
-      "description": "OpenAI model to use when AI Provider is set to 'openai'",
-      "default": "gpt-4o",
-      "one-of": [
-        "gpt-4o",
-        "gpt-4.1-mini"
-      ]
-    },
-    "openai-api-key": {
-      "type": "string",
-      "name": "OpenAI API Key",
-      "description": "Your OpenAI API key",
-      "default": ""
-    },
-
-    "ministral-section": {
-      "type": "title",
-      "name": "Mistral AI"
-    },
-    "ministral-model": {
-      "type": "string",
-      "name": "Ministral Model",
-      "description": "Mistral AI model to use when AI Provider is set to 'ministral'",
-      "default": "ministral-8b-latest",
-      "one-of": [
-        "ministral-3b-latest",
-        "ministral-8b-latest",
-        "mistral-small-latest",
-        "mistral-medium-latest",
-        "mistral-large-latest"
-      ]
-    },
-    "ministral-api-key": {
-      "type": "string",
-      "name": "Mistral API Key",
-      "description": "Your Mistral AI API key",
-      "default": ""
-    },
-
-    "huggingface-section": {
-      "type": "title",
-      "name": "HuggingFace"
-    },
-    "huggingface-model": {
-      "type": "string",
-      "name": "HuggingFace Model ID",
-      "description": "HuggingFace model to use",
-      "default": "meta-llama/Llama-3.1-8B-Instruct"
-    },
-    "huggingface-api-key": {
-      "type": "string",
-      "name": "HuggingFace API Key",
-      "description": "Your HuggingFace token",
-      "default": ""
-    },
-
-    "ollama-section": {
-      "type": "title",
-      "name": "Ollama"
-    },
-    "use-platinum": {
-      "type": "bool",
-      "name": "Use Platinum (Cloud)",
-      "description": "Use the EditorAI Platinum cloud Ollama service instead of a local Ollama instance",
-      "default": false
-    },
-    "ollama-model": {
-      "type": "string",
-      "name": "Ollama Model",
-      "description": "Which EditorAI Ollama model to use",
-      "default": "entity12208/editorai:deepseek",
-      "one-of": [
-        "entity12208/editorai:deepseek",
-        "entity12208/editorai:qwen",
-        "entity12208/editorai:qwen-learning",
-        "gpt-oss:120b-cloud"
-      ]
-    },
-
-    "rate-limiting-section": {
-      "type": "title",
-      "name": "Rate Limiting"
-    },
-    "enable-rate-limiting": {
-      "type": "bool",
-      "name": "Enable Rate Limiting",
-      "description": "Prevents excessive API calls to save tokens and avoid rate limits",
-      "default": true
-    },
-    "rate-limit-seconds": {
-      "type": "int",
-      "name": "Minimum Seconds Between Requests",
-      "description": "Minimum time between API requests (prevents spam)",
-      "default": 3,
-      "min": 1,
-      "max": 60,
-      "enable-if": "enable-rate-limiting"
-    },
-
-    "advanced-features-section": {
-      "type": "title",
-      "name": "Advanced Features"
-    },
-    "enable-advanced-features": {
-      "type": "bool",
-      "name": "Enable Advanced Features",
-      "description": "Unlocks all experimental AI capabilities. May produce less stable results.",
-      "default": false
-    },
-
-    "feedback-section": {
-      "type": "title",
-      "name": "Feedback & Learning"
-    },
-    "enable-rating": {
-      "type": "bool",
-      "name": "Rate Generations",
-      "description": "After accepting or denying a generation, a popup asks you to rate it 1-10. Top-rated results are fed back to the AI as examples so it learns your style over time.",
-      "default": true
-    },
-    "max-feedback-examples": {
-      "type": "int",
-      "name": "Max Examples in Prompt",
-      "description": "How many top-rated past generations to include as few-shot examples in the AI prompt. More examples = better learning but uses more tokens.",
-      "default": 3,
-      "min": 1,
-      "max": 10,
-      "enable-if": "enable-rating"
-    }
-
+    "ai-provider":              { "type": "string", "default": "gemini" },
+    "difficulty":               { "type": "string", "default": "medium" },
+    "style":                    { "type": "string", "default": "modern" },
+    "length":                   { "type": "string", "default": "medium" },
+    "max-objects":              { "type": "int",    "default": 500, "min": 10, "max": 10000 },
+    "spawn-batch-size":         { "type": "int",    "default": 8,   "min": 1,  "max": 100 },
+    "gemini-model":             { "type": "string", "default": "gemini-2.5-flash" },
+    "gemini-api-key":           { "type": "string", "default": "" },
+    "claude-model":             { "type": "string", "default": "claude-sonnet-4-6" },
+    "claude-api-key":           { "type": "string", "default": "" },
+    "openai-model":             { "type": "string", "default": "gpt-4o" },
+    "openai-api-key":           { "type": "string", "default": "" },
+    "ministral-model":          { "type": "string", "default": "ministral-8b-latest" },
+    "ministral-api-key":        { "type": "string", "default": "" },
+    "huggingface-model":        { "type": "string", "default": "meta-llama/Llama-3.1-8B-Instruct" },
+    "huggingface-api-key":      { "type": "string", "default": "" },
+    "use-platinum":             { "type": "bool",   "default": false },
+    "ollama-model":             { "type": "string", "default": "entity12208/editorai:deepseek" },
+    "ollama-timeout":           { "type": "int",    "default": 600, "min": 60, "max": 1800 },
+    "enable-rate-limiting":     { "type": "bool",   "default": true },
+    "rate-limit-seconds":       { "type": "int",    "default": 3,   "min": 1,  "max": 60 },
+    "enable-advanced-features": { "type": "bool",   "default": false },
+    "enable-rating":            { "type": "bool",   "default": true },
+    "max-feedback-examples":    { "type": "int",    "default": 3,   "min": 1,  "max": 10 }
   },
   "tags": [
     "editor",
