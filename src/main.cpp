@@ -275,7 +275,6 @@ static std::string getProviderModel(const std::string& provider) {
     if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-model");
     if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-model");
     if (provider == "ollama")       return Mod::get()->getSettingValue<std::string>("ollama-model");
-    if (provider == "local")        return Mod::get()->getSettingValue<std::string>("local-model");
     return "unknown";
 }
 
@@ -284,10 +283,6 @@ static std::string getOllamaUrl() {
     return usePlatinum
         ? "https://ollama-proxy-sh88.onrender.com"
         : "http://localhost:11434";
-}
-
-static std::string getLocalUrl() {
-    return Mod::get()->getSettingValue<std::string>("local-url");
 }
 
 // ─── Deferred object struct ───────────────────────────────────────────────────
@@ -804,9 +799,7 @@ protected:
     std::vector<IntInputMeta> m_intInputs;
     std::vector<CCMenuItemSpriteExtra*> m_tabBtns;
     async::TaskHolder<web::WebResponse> m_ollamaListener;
-    async::TaskHolder<web::WebResponse> m_localListener;
     std::vector<std::string> m_ollamaModels;  // auto-detected
-    std::vector<std::string> m_localModels;   // auto-detected from local server
 
     float m_rowY = 0;
     float m_labelX = 0;
@@ -1030,7 +1023,7 @@ protected:
 
     void buildGeneralTab() {
         addCycler("Provider:", "ai-provider",
-            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama", "local"});
+            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama"});
         addCycler("Difficulty:", "difficulty",
             {"easy", "medium", "hard", "extreme"});
         addCycler("Style:", "style",
@@ -1081,30 +1074,10 @@ protected:
             }
 
             addIntRow("Timeout (s):", "ollama-timeout", 60, 1800, 600);
-        } else if (provider == "local") {
-            addTextRow("Server URL:", "local-url", "http://localhost:11435", 200);
-
-            // Auto-detect models from local server
-            if (m_localModels.empty()) {
-                addInfoRow("Model:", "Detecting...", {200, 200, 100});
-                fetchLocalModels();
-            } else if (m_localModels.size() == 1 && m_localModels[0].rfind("(", 0) == 0) {
-                addInfoRow("Model:", m_localModels[0], {255, 100, 100});
-            } else {
-                addCycler("Model:", "local-model", m_localModels);
-            }
-
-            auto hint = CCLabelBMFont::create(
-                "Your own trained model. Run: python training/server/serve.py",
-                "bigFont.fnt");
-            hint->setScale(0.18f);
-            hint->setColor({150, 150, 150});
-            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
-            m_contentLayer->addChild(hint);
         }
 
         // Hint about key security
-        if (provider != "ollama" && provider != "local") {
+        if (provider != "ollama") {
             auto hint = CCLabelBMFont::create("Keys stored locally in Geode save data.", "bigFont.fnt");
             hint->setScale(0.2f);
             hint->setColor({150, 150, 150});
@@ -1189,55 +1162,7 @@ protected:
         );
     }
 
-    void fetchLocalModels() {
-        // Save text inputs first so local-url is committed
-        saveTextInputs();
-        std::string localUrl = Mod::get()->getSettingValue<std::string>("local-url");
-        log::info("Fetching models from Local AI server: {}/api/tags", localUrl);
 
-        auto request = web::WebRequest();
-        request.timeout(std::chrono::seconds(5));
-
-        m_localListener.spawn(
-            request.get(localUrl + "/api/tags"),
-            [this](web::WebResponse response) {
-                if (!response.ok()) {
-                    int code = response.code();
-                    log::warn("Local AI server not reachable: HTTP {}", code);
-                    m_localModels = code == 0
-                        ? std::vector<std::string>{"(server not running)"}
-                        : std::vector<std::string>{fmt::format("(error: HTTP {})", code)};
-                    buildTab(SettingsTab::Provider);
-                    return;
-                }
-
-                auto jsonRes = response.json();
-                if (!jsonRes) {
-                    m_localModels = {"(invalid response)"};
-                    buildTab(SettingsTab::Provider);
-                    return;
-                }
-
-                auto json = jsonRes.unwrap();
-                m_localModels.clear();
-
-                if (json.contains("models") && json["models"].isArray()) {
-                    for (size_t i = 0; i < json["models"].size(); ++i) {
-                        auto nameResult = json["models"][i]["name"].asString();
-                        if (nameResult)
-                            m_localModels.push_back(nameResult.unwrap());
-                    }
-                }
-
-                if (m_localModels.empty()) {
-                    m_localModels = {"(no models loaded)"};
-                }
-
-                log::info("Detected {} models from Local AI server", m_localModels.size());
-                buildTab(SettingsTab::Provider);
-            }
-        );
-    }
 
     // ── Cycler callbacks ────────────────────────────────────────────────
 
@@ -1273,7 +1198,6 @@ protected:
         // If provider changed, rebuild Provider tab data
         if (info.settingId == "ai-provider" && m_currentTab == SettingsTab::Provider) {
             m_ollamaModels.clear();
-            m_localModels.clear();
             buildTab(SettingsTab::Provider);
         }
 
@@ -1525,8 +1449,6 @@ protected:
         if (provider == "ollama") {
             bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
             keyStatus = usePlatinum ? "<cg>Platinum cloud</c>" : "<cg>Local — no key needed</c>";
-        } else if (provider == "local") {
-            keyStatus = "<cg>Local AI — no key needed</c>";
         } else {
             keyStatus = apiKey.empty()
                 ? "<cr>Not set — go to mod settings</c>"
@@ -2650,24 +2572,6 @@ protected:
             requestBody["options"] = options;
 
             url = ollamaUrl + "/api/generate";
-
-        // ── Local AI (EditorAI trained model) ─────────────────────────────────
-        // Uses the same NDJSON streaming API as Ollama, served by training/server/serve.py
-        } else if (provider == "local") {
-            std::string localUrl = getLocalUrl();
-            log::info("Using Local AI at: {}", localUrl + "/api/generate");
-
-            auto options = matjson::Value::object();
-            options["temperature"] = 0.7;
-
-            requestBody            = matjson::Value::object();
-            requestBody["model"]   = model;
-            requestBody["prompt"]  = systemPrompt + "\n\n" + fullPrompt;
-            requestBody["stream"]  = true;
-            requestBody["format"]  = "json";
-            requestBody["options"] = options;
-
-            url = localUrl + "/api/generate";
         }
 
         std::string jsonBody = requestBody.dump();
@@ -2688,8 +2592,6 @@ protected:
             // Ollama can be very slow on large models with partial GPU offload.
             int timeoutSec = (int)Mod::get()->getSettingValue<int64_t>("ollama-timeout");
             request.timeout(std::chrono::seconds(timeoutSec));
-        } else if (provider == "local") {
-            request.timeout(std::chrono::seconds(300));
         }
 
         request.bodyString(jsonBody);
@@ -2747,7 +2649,7 @@ protected:
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string apiKey   = getProviderApiKey(provider);
 
-        if (apiKey.empty() && provider != "ollama" && provider != "local") {
+        if (apiKey.empty() && provider != "ollama") {
             FLAlertLayer::create("API Key Required",
                 gd::string(fmt::format(
                     "Please open mod settings and enter your API key under the {} section.",
@@ -2812,7 +2714,7 @@ protected:
             // and always fails on streaming output. We must parse line by line,
             // accumulate all "response" fields, and verify "done":true on the
             // final line.
-            if (provider == "ollama" || provider == "local") {
+            if (provider == "ollama") {
                 auto rawResult = response.string();
                 if (!rawResult) {
                     onError("Invalid Response", "The API returned invalid data.");
