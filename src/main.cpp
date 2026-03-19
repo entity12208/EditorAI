@@ -134,9 +134,43 @@ static bool parseHexColor(const std::string& hex, GLubyte& r, GLubyte& g, GLubyt
     } catch (...) { return false; }
 }
 
+// ─── Error code system ────────────────────────────────────────────────────────
+// Format: EAI-CCSS where CC = category, SS = specific error
+//
+// Categories:
+//   10 = Connection errors (can't reach server)
+//   20 = Authentication errors (bad API key)
+//   30 = Permission/quota errors (valid key, no access)
+//   40 = Request errors (bad model, bad request body)
+//   50 = Server errors (provider is down)
+//   60 = Response parsing errors (AI returned bad data)
+//   70 = Generation errors (valid data but unusable)
+//   80 = Ollama-specific errors
+//
+// The error code encodes: provider initial + category + specific error
+
+static std::string makeErrorCode(const std::string& provider, int category, int specific) {
+    // Provider prefix: G=gemini, C=claude, O=openai, M=mistral, H=huggingface, L=ollama, X=unknown
+    char p = 'X';
+    if (provider == "gemini")      p = 'G';
+    else if (provider == "claude")      p = 'C';
+    else if (provider == "openai")      p = 'O';
+    else if (provider == "ministral")   p = 'M';
+    else if (provider == "huggingface") p = 'H';
+    else if (provider == "ollama")      p = 'L';
+    return fmt::format("EAI-{}{:02d}{:02d}", p, category, specific);
+}
+
+// Convenience: generate error code from the current provider setting
+static std::string autoErrorCode(int category, int specific) {
+    std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+    return makeErrorCode(provider, category, specific);
+}
+
 static std::pair<std::string, std::string> parseAPIError(const std::string& errorBody, int statusCode) {
     std::string title   = "API Error";
     std::string message = "An unknown error occurred. Please try again.";
+    std::string code;
     try {
         auto json = matjson::parse(errorBody);
         if (!json) return {title, message};
@@ -173,10 +207,10 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
         };
 
         if (statusCode == 401) {
-            // 401 = Unauthorized — definitively a bad/missing API key
+            code    = autoErrorCode(20, 1);
             title   = "Invalid API Key";
-            message = "Your API key was rejected (HTTP 401).\n\nPlease check your API key in mod settings and try again.";
-            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            message = fmt::format("[{}] Your API key was rejected (HTTP 401).\n\nOpen settings (gear icon) and check your API key.", code);
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
 
         } else if (statusCode == 403) {
             // 403 = Forbidden — could be a bad key, BUT more commonly means the key
@@ -186,73 +220,80 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
             //   - API not enabled in Google Cloud Console
             //   - IP or referrer restriction on the key
             if (isKeyError()) {
+                code    = autoErrorCode(20, 3);
                 title   = "Invalid API Key";
-                message = "Your API key does not have permission to access this API.\n\nPlease check your API key in mod settings.";
+                message = fmt::format("[{}] Your API key does not have permission.", code);
             } else {
-                title   = "Access Denied (HTTP 403)";
-                message = "The service denied the request. This is usually NOT a bad key.\n\n"
+                code    = autoErrorCode(30, 3);
+                title   = "Access Denied";
+                message = fmt::format("[{}] The service denied the request.\n\n"
                           "Common causes:\n"
-                          "- This model requires a paid plan or billing enabled\n"
-                          "- Your free-tier quota for this model is exhausted\n"
-                          "- The API is not enabled in your provider dashboard\n\n"
-                          "Check your account limits at the provider's dashboard.";
+                          "- Model requires a paid plan\n"
+                          "- Free-tier quota exhausted\n"
+                          "- API not enabled in provider dashboard", code);
             }
-            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
 
         } else if (statusCode == 404) {
-            // 404 = Not Found — usually an invalid model name
+            code    = autoErrorCode(40, 4);
             title   = "Model Not Found";
-            message = "The specified model was not found (HTTP 404).\n\nPlease check your model setting.";
-            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            message = fmt::format("[{}] The model was not found (HTTP 404).\n\nOpen settings and check the model name.", code);
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
 
         } else if (statusCode == 429) {
+            bool isQuota = errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos;
+            code    = autoErrorCode(30, isQuota ? 29 : 9);
             title   = "Rate Limit Exceeded";
-            message = (errorMsg.find("quota") != std::string::npos || errorMsg.find("Quota") != std::string::npos)
-                ? "You've exceeded your API quota.\n\nPlease wait or upgrade your plan."
-                : "Too many requests.\n\nPlease wait a moment and try again.";
+            message = isQuota
+                ? fmt::format("[{}] API quota exhausted. Wait or upgrade your plan.", code)
+                : fmt::format("[{}] Too many requests. Wait a moment and try again.", code);
 
         } else if (statusCode == 400) {
             // 400 = Bad Request — Gemini returns this for invalid API keys
             // (INVALID_ARGUMENT), so we need to distinguish key errors from
             // other malformed-request errors.
             if (isKeyError()) {
+                code    = autoErrorCode(20, 0);
                 title   = "Invalid API Key";
-                message = "Your API key was rejected by the service.\n\nPlease check your API key in mod settings.";
-                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+                message = fmt::format("[{}] Your API key was rejected.", code);
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
             } else if (errorMsg.find("model") != std::string::npos
                     || errorStatus == "NOT_FOUND") {
+                code    = autoErrorCode(40, 0);
                 title   = "Invalid Model";
-                message = "The selected model is invalid or not supported.\n\nPlease check your model setting.";
-                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+                message = fmt::format("[{}] The model is invalid or not supported.", code);
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
             } else {
+                code    = autoErrorCode(40, 99);
                 title   = "Invalid Request";
-                message = "The request was rejected by the service.";
-                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+                message = fmt::format("[{}] The request was rejected.", code);
+                if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
             }
 
         } else if (statusCode >= 500) {
+            code    = autoErrorCode(50, std::min(statusCode - 500, 99));
             title   = fmt::format("Service Error (HTTP {})", statusCode);
-            message = "The AI service is currently unavailable.\n\nPlease try again later.";
-            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 150);
+            message = fmt::format("[{}] The AI service is unavailable. Try again later.", code);
+            if (!errorMsg.empty()) message += "\n\nDetail: " + errorMsg.substr(0, 120);
         } else if (statusCode == 0) {
+            code    = autoErrorCode(10, 1);
             title   = "Connection Failed";
-            message = "Could not reach the AI service.\n\n"
-                      "Check your internet connection. If using Ollama, make sure it's running "
-                      "(run 'ollama serve' in a terminal).";
+            message = fmt::format("[{}] Could not reach the AI service.\n\n"
+                      "Check your internet connection. If using Ollama, make sure it's running.", code);
         } else if (!errorMsg.empty()) {
+            code    = autoErrorCode(40, 50);
             title   = fmt::format("API Error (HTTP {})", statusCode);
-            message = errorMsg.substr(0, 200);
-            if (errorMsg.length() > 200) message += "...";
+            message = fmt::format("[{}] {}", code, errorMsg.substr(0, 180));
         } else {
+            code    = autoErrorCode(40, 98);
             title   = fmt::format("API Error (HTTP {})", statusCode);
-            // Show truncated raw body for debugging
-            std::string body = errorBody.substr(0, 200);
-            if (errorBody.length() > 200) body += "...";
-            message = fmt::format("Unexpected error.\n\nHTTP {}\n\n{}", statusCode, body);
+            message = fmt::format("[{}] Unexpected HTTP {} error.\n\n{}", code, statusCode,
+                errorBody.substr(0, 150));
         }
     } catch (...) {
+        std::string code = autoErrorCode(10, 98);
         title   = fmt::format("API Error (HTTP {})", statusCode);
-        message = fmt::format("HTTP {} — {}", statusCode, errorBody.substr(0, 200));
+        message = fmt::format("[{}] HTTP {} — {}", code, statusCode, errorBody.substr(0, 150));
     }
     return {title, message};
 }
@@ -2099,10 +2140,10 @@ protected:
 
         if (m_deferredObjects.empty()) {
             onError("No Valid Objects",
-                "The AI response contained no usable objects.\n\n"
-                "This can happen when the model uses unknown type names or omits "
-                "required fields (x, y). Try rephrasing your prompt or switching "
-                "to a more capable model.");
+                fmt::format("[{}] No usable objects in the AI response.\n\n"
+                "The model may have used unknown type names or omitted x/y fields. "
+                "Try rephrasing or switching to a better model.",
+                autoErrorCode(70, 2)));
             return;
         }
 
@@ -2717,7 +2758,7 @@ protected:
             if (provider == "ollama") {
                 auto rawResult = response.string();
                 if (!rawResult) {
-                    onError("Invalid Response", "The API returned invalid data.");
+                    onError("Invalid Response", fmt::format("[{}] The API returned invalid data.", autoErrorCode(60, 1)));
                     return;
                 }
 
@@ -2757,7 +2798,7 @@ protected:
                     // Also surface any Ollama-level error messages
                     auto errorMsg = lineObj["error"].asString();
                     if (errorMsg) {
-                        onError("Ollama Error", errorMsg.unwrap());
+                        onError("Ollama Error", fmt::format("[{}] {}", autoErrorCode(80, 1), errorMsg.unwrap()));
                         return;
                     }
                 }
@@ -2767,14 +2808,14 @@ protected:
 
                 if (!isDone) {
                     onError("Incomplete Response",
-                        "Ollama stopped generating before the level was complete.\n\n"
-                        "Try requesting a shorter level, reducing the max-objects setting, "
-                        "or using a model with a larger context window (e.g. llama3.1:8b or mistral:7b).");
+                        fmt::format("[{}] Ollama stopped before finishing.\n\n"
+                        "Try a shorter level, fewer max objects, or a model with a larger context window.",
+                        autoErrorCode(80, 3)));
                     return;
                 }
 
                 if (accumulated.empty()) {
-                    onError("Invalid Response", "Ollama returned an empty response.");
+                    onError("Invalid Response", fmt::format("[{}] Ollama returned an empty response.", autoErrorCode(80, 2)));
                     return;
                 }
 
@@ -2784,7 +2825,7 @@ protected:
             } else {
                 auto jsonRes = response.json();
                 if (!jsonRes) {
-                    onError("Invalid Response", "The API returned invalid data.");
+                    onError("Invalid Response", fmt::format("[{}] The API returned invalid data.", autoErrorCode(60, 1)));
                     return;
                 }
 
@@ -2798,8 +2839,8 @@ protected:
                             const std::string& reason = blockReasonResult.unwrap();
                             if (!reason.empty() && reason != "BLOCK_REASON_UNSPECIFIED") {
                                 onError("Prompt Blocked",
-                                    fmt::format("Gemini blocked the request before generating.\n\nReason: {}\n\n"
-                                        "Try rephrasing your prompt.", reason));
+                                    fmt::format("[{}] Gemini blocked the request.\n\nReason: {}\n\n"
+                                        "Try rephrasing your prompt.", autoErrorCode(70, 10), reason));
                                 return;
                             }
                         }
@@ -2807,7 +2848,7 @@ protected:
 
                     auto candidates = json["candidates"];
                     if (!candidates.isArray() || candidates.size() == 0) {
-                        onError("No Response", "The AI didn't generate any content."); return;
+                        onError("No Response", fmt::format("[{}] The AI returned no content.", autoErrorCode(60, 4))); return;
                     }
 
                     auto finishReasonResult = candidates[0]["finishReason"].asString();
@@ -2815,14 +2856,14 @@ protected:
                         const std::string& finishReason = finishReasonResult.unwrap();
                         if (finishReason == "SAFETY") {
                             onError("Response Blocked",
-                                "Gemini's safety filter blocked the generated level.\n\n"
-                                "Try rephrasing your prompt or using different difficulty/style settings.");
+                                fmt::format("[{}] Gemini's safety filter blocked the response.\n\n"
+                                "Try rephrasing your prompt or changing difficulty/style.", autoErrorCode(70, 11)));
                             return;
                         }
                         if (finishReason == "RECITATION") {
                             onError("Response Blocked",
-                                "Gemini blocked the response due to recitation policy.\n\n"
-                                "Try rephrasing your prompt.");
+                                fmt::format("[{}] Gemini blocked the response (recitation policy).\n\n"
+                                "Try rephrasing your prompt.", autoErrorCode(70, 12)));
                             return;
                         }
                         if (finishReason == "MAX_TOKENS") {
@@ -2831,26 +2872,26 @@ protected:
                     }
 
                     auto textResult = candidates[0]["content"]["parts"][0]["text"].asString();
-                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    if (!textResult) { onError("Invalid Response", fmt::format("[{}] Failed to extract text from AI response.", autoErrorCode(60, 3))); return; }
                     aiResponse = textResult.unwrap();
 
                 } else if (provider == "claude") {
                     auto content = json["content"];
                     if (!content.isArray() || content.size() == 0) {
-                        onError("No Response", "The AI didn't generate any content."); return;
+                        onError("No Response", fmt::format("[{}] The AI returned no content.", autoErrorCode(60, 4))); return;
                     }
                     auto textResult = content[0]["text"].asString();
-                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    if (!textResult) { onError("Invalid Response", fmt::format("[{}] Failed to extract text from AI response.", autoErrorCode(60, 3))); return; }
                     aiResponse = textResult.unwrap();
 
                 // OpenAI, Mistral AI, and HuggingFace all use the same response format
                 } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
                     auto choices = json["choices"];
                     if (!choices.isArray() || choices.size() == 0) {
-                        onError("No Response", "The AI didn't generate any content."); return;
+                        onError("No Response", fmt::format("[{}] The AI returned no content.", autoErrorCode(60, 4))); return;
                     }
                     auto textResult = choices[0]["message"]["content"].asString();
-                    if (!textResult) { onError("Invalid Response", "Failed to extract AI response."); return; }
+                    if (!textResult) { onError("Invalid Response", fmt::format("[{}] Failed to extract text from AI response.", autoErrorCode(60, 3))); return; }
                     aiResponse = textResult.unwrap();
                 }
             }
@@ -2877,21 +2918,21 @@ protected:
             size_t jsonStart = aiResponse.find('{');
             size_t jsonEnd   = aiResponse.rfind('}');
             if (jsonStart == std::string::npos || jsonEnd == std::string::npos) {
-                onError("Invalid Response", "No valid level data found in response."); return;
+                onError("Invalid Response", fmt::format("[{}] No valid level data found in response.", autoErrorCode(60, 5))); return;
             }
             aiResponse = aiResponse.substr(jsonStart, jsonEnd - jsonStart + 1);
 
             auto levelJson = matjson::parse(aiResponse);
-            if (!levelJson) { onError("Parse Error", "Failed to parse level data."); return; }
+            if (!levelJson) { onError("Parse Error", fmt::format("[{}] Failed to parse level data as JSON.", autoErrorCode(60, 6))); return; }
 
             auto levelData = levelJson.unwrap();
             if (!levelData.contains("objects")) {
-                onError("Invalid Data", "Response doesn't contain level objects."); return;
+                onError("Invalid Data", fmt::format("[{}] Response doesn't contain an objects array.", autoErrorCode(60, 7))); return;
             }
 
             auto objectsArray = levelData["objects"];
             if (!objectsArray.isArray() || objectsArray.size() == 0) {
-                onError("No Objects", "The AI didn't generate any objects."); return;
+                onError("No Objects", fmt::format("[{}] The AI returned an empty objects array.", autoErrorCode(70, 1))); return;
             }
 
             // Capture the generated objects JSON for feedback storage
@@ -2910,7 +2951,7 @@ protected:
 
         } catch (std::exception& e) {
             log::error("Exception during response processing: {}", e.what());
-            onError("Processing Error", "Failed to process AI response.");
+            onError("Processing Error", fmt::format("[{}] Exception while processing AI response.", autoErrorCode(60, 99)));
         }
     }
 
