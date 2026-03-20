@@ -7,18 +7,19 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 1. Download the [latest release](https://github.com/entity12208/editorai/releases/latest)
 2. Open the game and navigate to the Geode page
 3. Press the manual download button and select the file
-4. Set up the mod using one of the AI providers below
+4. Open the editor and press the **AI** button
+5. Click the **gear icon** to configure your AI provider
 
 ## AI Setup
+
+All settings are configured in-game via the **gear icon** in the AI popup. No need to dig through Geode mod settings.
 
 ### EditorAI Platinum *(Free — recommended)*
 [EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a community proxy that lets anyone run the official EditorAI Ollama models over the internet for free.
 
-1. In mod settings, set **AI Provider** to `ollama`
-2. Enable the **Use Platinum** toggle
-3. Select a model from the **Ollama Model** dropdown:
-   - `entity12208/editorai:qwen` — more powerful
-   - `entity12208/editorai:deepseek` — more creative
+1. Open settings → set **Provider** to `ollama`
+2. Switch to the **Provider** tab and enable **Platinum**
+3. Available models are auto-detected from the Platinum network
 
 Want to donate your computer to the network? Follow the instructions in the [Platinum repository](https://github.com/entity12208/editorai-platinum).
 
@@ -26,51 +27,88 @@ Want to donate your computer to the network? Follow the instructions in the [Pla
 *Uses ~5.2 GB storage. Fully local and private — no internet required after setup.*
 
 1. Download and install [Ollama](https://ollama.com)
-2. Pull the official model: `ollama pull entity12208/editorai:<model>`
+2. Pull the official model: `ollama pull entity12208/editorai:qwen`
    - `deepseek` — more creative &nbsp;|&nbsp; `qwen` — more powerful &nbsp;(each ~5.2 GB)
-3. In mod settings, set **AI Provider** to `ollama` and leave **Use Platinum** off
-4. Select your model from the **Ollama Model** dropdown
+3. Open settings → set **Provider** to `ollama`
+4. Your installed models are auto-detected on the **Provider** tab
 
 ### Claude *(Paid)*
 1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
-2. In mod settings, set **AI Provider** to `claude` and choose a model
-3. Paste your key into the **Claude API Key** field in mod settings
+2. Open settings → set **Provider** to `claude` → switch to **Provider** tab
+3. Select a model and paste your API key
 
 ### Mistral AI *(Paid)*
 1. Get an API key at [console.mistral.ai](https://console.mistral.ai/api-keys/)
-2. In mod settings, set **AI Provider** to `ministral` and choose a model
-3. Paste your key into the **Mistral API Key** field in mod settings
+2. Open settings → set **Provider** to `ministral` → switch to **Provider** tab
+3. Select a model and paste your API key
 
 ### HuggingFace *(Free tier available)*
 1. Get a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-2. In mod settings, set **AI Provider** to `huggingface`
-3. Enter a model ID in the model field (default: `meta-llama/Llama-3.1-8B-Instruct`)
-4. Paste your token into the **HuggingFace API Key** field in mod settings
+2. Open settings → set **Provider** to `huggingface` → switch to **Provider** tab
+3. Enter a model ID and paste your token
 
 ### ChatGPT *(Paid)*
 1. Get an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
-2. In mod settings, set **AI Provider** to `openai` and choose a model
-3. Paste your key into the **OpenAI API Key** field in mod settings
+2. Open settings → set **Provider** to `openai` → switch to **Provider** tab
+3. Select a model and paste your API key
 
 ### Gemini *(Not recommended — tight rate limits)*
 1. Get an API key at [aistudio.google.com/api-keys](https://aistudio.google.com/u/0/api-keys)
-2. In mod settings, set **AI Provider** to `gemini` and choose a model
-3. Paste your key into the **Gemini API Key** field in mod settings
+2. Open settings → set **Provider** to `gemini` → switch to **Provider** tab
+3. Select a model and paste your API key
 
 ## Usage
-1. Download and set up the mod
-2. Open the editor of any level
-3. Press the **AI** button in the top right
-4. Enable or disable **Clear Level**, and enter your prompt
-5. Click **Generate** and wait!
+1. Open the editor of any level
+2. Press the **AI** button in the editor toolbar
+3. Type a description of what you want (e.g. "medium difficulty platforming level")
+4. Click **Generate** and wait — a timer shows elapsed time
+5. AI-generated objects appear as **blue ghost previews**
+6. Choose **Accept**, **Edit**, or **Deny**:
+   - **Accept** — makes objects permanent
+   - **Edit** — makes objects solid so you can move/delete them, then press **Done**
+   - **Deny** — removes all generated objects
+7. Optionally rate the generation 1-10 to help the AI learn your style
+
+Use the **up/down arrows** next to the text input to recall previous prompts. Press **Cancel** during generation to abort.
+
+## Settings
+
+Click the **gear icon** in the top-left of the AI popup to access all settings, organized into three tabs:
+
+| Tab | Settings |
+|-----|----------|
+| **General** | Provider, difficulty, style, length, max objects, spawn speed |
+| **Provider** | Model selection, API keys, Ollama/Platinum config, timeout |
+| **Advanced** | Triggers & colors, rate limiting, feedback & learning |
 
 ## Advanced Features
-Enable **Advanced Features** in mod settings to unlock:
-- **Color Triggers** — AI can place color triggers that smoothly transition background, ground, and object colors
-- **Move Triggers** — AI can create moving platforms and obstacles using grouped objects and move triggers with easing
-- **Group IDs** — AI assigns group IDs to objects so move triggers can target them precisely
+Enable **Triggers/Colors** in the Advanced settings tab to unlock:
+- **Color Triggers** — smooth color transitions for background, ground, and objects
+- **Move Triggers** — moving platforms and obstacles with easing curves
+- **Rotate Triggers** — spinning decorations and obstacles around center points
+- **Alpha Triggers** — fade objects in and out
+- **Toggle Triggers** — show/hide groups of objects
+- **Pulse Triggers** — flash colors on groups for visual emphasis
+- **Spawn & Stop Triggers** — chain trigger sequences and cancel animations
+- **Speed Portals** — control game speed (0.5x to 4x)
+- **Player Visibility** — show/hide the player icon and trail
+- **Color Channels** — assign objects to color channels for coordinated color changes
+- **Group IDs** — assign objects to groups for trigger targeting
+- **Multi-Activate** — make orbs, pads, and triggers fire on every touch
 
-These features work best with smarter models (Claude, Ollama qwen, or Platinum).
+These features work best with smarter models (Claude, Gemini, Ollama qwen, or Platinum).
+
+## Blueprint Preview
+Generated objects appear as blue-tinted ghost previews (40% opacity, non-interactable) before you commit them. This lets you see what the AI made before it affects your level. The **Edit** button makes objects solid so you can rearrange or delete individual pieces before pressing **Done**.
+
+## Feedback & Learning
+When enabled (on by default), a rating popup appears after you accept/edit/deny a generation. Your ratings and optional text feedback are stored locally and injected into future AI prompts as examples — the AI learns what you like and avoids what you don't. Feedback examples are matched by similarity to your current request (difficulty, style, length).
+
+## Error Codes
+If something goes wrong, the error message includes a code like `[EAI-G2001]`. Share this code when reporting issues — it encodes the provider, error category, and specific problem, making diagnosis much faster.
+
+## Fine-Tune Your Own Model
+The `training/` folder contains scripts to fine-tune a Qwen Instruct model on GD level data using QLoRA, then export it to Ollama. See [training/README.md](training/README.md) for details.
 
 ## Support
 Join the [Editor AI Discord server](https://discord.gg/5hwCqMUYNj) for support and ideas.
