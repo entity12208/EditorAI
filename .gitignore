@@ -62,3 +62,13 @@ build-*/
 # CLion
 .idea/
 /cmake-build-*/
+
+# Training artifacts
+training/data/
+training/output/
+training/export/
+training/__pycache__/
+training/.venv/
+training/*.gguf
+*.pt
+*.safetensors
