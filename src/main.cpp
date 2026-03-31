@@ -158,6 +158,8 @@ static std::string makeErrorCode(const std::string& provider, int category, int 
     else if (provider == "ministral")   p = 'M';
     else if (provider == "huggingface") p = 'H';
     else if (provider == "ollama")      p = 'L';
+    else if (provider == "lm-studio")   p = 'S';
+    else if (provider == "llama-cpp")   p = 'Y';
     return fmt::format("EAI-{}{:02d}{:02d}", p, category, specific);
 }
 
@@ -316,6 +318,8 @@ static std::string getProviderModel(const std::string& provider) {
     if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-model");
     if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-model");
     if (provider == "ollama")       return Mod::get()->getSettingValue<std::string>("ollama-model");
+    if (provider == "lm-studio")    return Mod::get()->getSettingValue<std::string>("lm-studio-model");
+    if (provider == "llama-cpp")    return Mod::get()->getSettingValue<std::string>("llama-cpp-model");
     return "unknown";
 }
 
@@ -1064,7 +1068,7 @@ protected:
 
     void buildGeneralTab() {
         addCycler("Provider:", "ai-provider",
-            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama"});
+            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama", "lm-studio", "llama-cpp"});
         addCycler("Difficulty:", "difficulty",
             {"easy", "medium", "hard", "extreme"});
         addCycler("Style:", "style",
@@ -1115,6 +1119,28 @@ protected:
             }
 
             addIntRow("Timeout (s):", "ollama-timeout", 60, 1800, 600);
+        } else if (provider == "lm-studio") {
+            addTextRow("URL:", "lm-studio-url", "http://localhost:1234", 200);
+            addTextRow("Model:", "lm-studio-model", "loaded model name", 200);
+
+            auto hint = CCLabelBMFont::create(
+                "Run LM Studio locally. Load a model, then start the server.",
+                "bigFont.fnt");
+            hint->setScale(0.18f);
+            hint->setColor({150, 150, 150});
+            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
+            m_contentLayer->addChild(hint);
+        } else if (provider == "llama-cpp") {
+            addTextRow("URL:", "llama-cpp-url", "http://localhost:8080", 200);
+            addTextRow("Model:", "llama-cpp-model", "default", 200);
+
+            auto hint = CCLabelBMFont::create(
+                "Run: llama-server -m model.gguf --port 8080",
+                "bigFont.fnt");
+            hint->setScale(0.18f);
+            hint->setColor({150, 150, 150});
+            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
+            m_contentLayer->addChild(hint);
         }
 
         // Hint about key security
@@ -1490,6 +1516,10 @@ protected:
         if (provider == "ollama") {
             bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
             keyStatus = usePlatinum ? "<cg>Platinum cloud</c>" : "<cg>Local — no key needed</c>";
+        } else if (provider == "lm-studio") {
+            keyStatus = "<cg>Local (LM Studio) — no key needed</c>";
+        } else if (provider == "llama-cpp") {
+            keyStatus = "<cg>Local (llama.cpp) — no key needed</c>";
         } else {
             keyStatus = apiKey.empty()
                 ? "<cr>Not set — go to mod settings</c>"
@@ -2593,6 +2623,44 @@ protected:
 
             url = "https://router.huggingface.co/v1/chat/completions";
 
+        // ── LM Studio (OpenAI-compatible local server) ─────────────────────────
+        } else if (provider == "lm-studio") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                          = matjson::Value::object();
+            requestBody["model"]                 = model;
+            requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_completion_tokens"] = 16384;
+            requestBody["temperature"]           = 0.7;
+
+            std::string lmUrl = Mod::get()->getSettingValue<std::string>("lm-studio-url");
+            url = lmUrl + "/v1/chat/completions";
+
+        // ── llama.cpp server (OpenAI-compatible local server) ─────────────────
+        } else if (provider == "llama-cpp") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                          = matjson::Value::object();
+            requestBody["model"]                 = model;
+            requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_completion_tokens"] = 16384;
+            requestBody["temperature"]           = 0.7;
+
+            std::string lcUrl = Mod::get()->getSettingValue<std::string>("llama-cpp-url");
+            url = lcUrl + "/v1/chat/completions";
+
         // ── Ollama ─────────────────────────────────────────────────────────────
         // stream=true is REQUIRED — without it, curl times out on large responses
         // because Ollama doesn't send the final HTTP chunk until generation is done.
@@ -2629,6 +2697,9 @@ protected:
             request.header("anthropic-version", "2023-06-01");
         } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
+        } else if (provider == "lm-studio" || provider == "llama-cpp") {
+            // Local servers — no auth needed, generous timeout
+            request.timeout(std::chrono::seconds(300));
         } else if (provider == "ollama") {
             // Ollama can be very slow on large models with partial GPU offload.
             int timeoutSec = (int)Mod::get()->getSettingValue<int64_t>("ollama-timeout");
@@ -2690,7 +2761,7 @@ protected:
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string apiKey   = getProviderApiKey(provider);
 
-        if (apiKey.empty() && provider != "ollama") {
+        if (apiKey.empty() && provider != "ollama" && provider != "lm-studio" && provider != "llama-cpp") {
             FLAlertLayer::create("API Key Required",
                 gd::string(fmt::format(
                     "Please open mod settings and enter your API key under the {} section.",
@@ -2885,7 +2956,8 @@ protected:
                     aiResponse = textResult.unwrap();
 
                 // OpenAI, Mistral AI, and HuggingFace all use the same response format
-                } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
+                } else if (provider == "openai" || provider == "ministral" || provider == "huggingface"
+                        || provider == "lm-studio" || provider == "llama-cpp") {
                     auto choices = json["choices"];
                     if (!choices.isArray() || choices.size() == 0) {
                         onError("No Response", fmt::format("[{}] The AI returned no content.", autoErrorCode(60, 4))); return;

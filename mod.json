@@ -1,5 +1,5 @@
 {
-  "geode": "5.3.0",
+  "geode": "5.4.1",
   "gd": {
     "win": "2.2081",
     "android": "2.2081",
@@ -8,7 +8,7 @@
   },
   "id": "entity12208.edit-ai",
   "name": "Editor AI",
-  "version": "v2.1.8",
+  "version": "v2.1.9",
   "developer": "entity12208",
   "description": "Generate Geometry Dash levels using AI!",
   "dependencies": {
@@ -44,6 +44,10 @@
     "use-platinum":             { "type": "bool",   "default": false },
     "ollama-model":             { "type": "string", "default": "entity12208/editorai:deepseek" },
     "ollama-timeout":           { "type": "int",    "default": 600, "min": 60, "max": 1800 },
+    "lm-studio-url":            { "type": "string", "default": "http://localhost:1234" },
+    "lm-studio-model":          { "type": "string", "default": "default" },
+    "llama-cpp-url":            { "type": "string", "default": "http://localhost:8080" },
+    "llama-cpp-model":          { "type": "string", "default": "default" },
     "enable-rate-limiting":     { "type": "bool",   "default": true },
     "rate-limit-seconds":       { "type": "int",    "default": 3,   "min": 1,  "max": 60 },
     "enable-advanced-features": { "type": "bool",   "default": false },
