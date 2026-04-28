@@ -12,13 +12,13 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 
 ## AI Setup
 
-All settings are configured in-game via the **gear icon** in the AI popup. No need to dig through Geode mod settings.
+All settings are configured in-game via the **gear icon** in the AI popup.
 
-### EditorAI Platinum *(Free — recommended)*
-[EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a community proxy that lets anyone run the official EditorAI Ollama models over the internet for free.
+### EditorAI Platinum *(Free - servers WIP)*
+[EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a community proxy that lets anyone run the official EditorAI Ollama models over the internet for free (subject to availability).
 
 1. Open settings → set **Provider** to `ollama`
-2. Switch to the **Provider** tab and enable **Platinum**
+2. Switch to the **Provider** tab and enable **Platinum**. If it says any http error, Platinum is offline.
 3. Available models are auto-detected from the Platinum network
 
 Want to donate your computer to the network? Follow the instructions in the [Platinum repository](https://github.com/entity12208/editorai-platinum).
@@ -27,10 +27,9 @@ Want to donate your computer to the network? Follow the instructions in the [Pla
 *Uses ~5.2 GB storage. Fully local and private — no internet required after setup.*
 
 1. Download and install [Ollama](https://ollama.com)
-2. Pull the official model: `ollama pull entity12208/editorai:qwen`
-   - `deepseek` — more creative &nbsp;|&nbsp; `qwen` — more powerful &nbsp;(each ~5.2 GB)
+2. Pull any model
 3. Open settings → set **Provider** to `ollama`
-4. Your installed models are auto-detected on the **Provider** tab
+4. Select the model you want
 
 ### Claude *(Paid)*
 1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
@@ -43,9 +42,9 @@ Want to donate your computer to the network? Follow the instructions in the [Pla
 3. Select a model and paste your API key
 
 ### HuggingFace *(Free tier available)*
-1. Get a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+1. Get a write token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 
 2. Open settings → set **Provider** to `huggingface` → switch to **Provider** tab
-3. Enter a model ID and paste your token
+3. Enter a model ID and paste your token 
 
 ### ChatGPT *(Paid)*
 1. Get an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
@@ -67,7 +66,7 @@ Want to donate your computer to the network? Follow the instructions in the [Pla
    - **Accept** — makes objects permanent
    - **Edit** — makes objects solid so you can move/delete them, then press **Done**
    - **Deny** — removes all generated objects
-7. Optionally rate the generation 1-10 to help the AI learn your style
+7. Optionally rate the generation 1-10 to help the AI learn
 
 Use the **up/down arrows** next to the text input to recall previous prompts. Press **Cancel** during generation to abort.
 
@@ -98,17 +97,11 @@ Enable **Triggers/Colors** in the Advanced settings tab to unlock:
 
 These features work best with smarter models (Claude, Gemini, Ollama qwen, or Platinum).
 
-## Blueprint Preview
-Generated objects appear as blue-tinted ghost previews (40% opacity, non-interactable) before you commit them. This lets you see what the AI made before it affects your level. The **Edit** button makes objects solid so you can rearrange or delete individual pieces before pressing **Done**.
-
 ## Feedback & Learning
-When enabled (on by default), a rating popup appears after you accept/edit/deny a generation. Your ratings and optional text feedback are stored locally and injected into future AI prompts as examples — the AI learns what you like and avoids what you don't. Feedback examples are matched by similarity to your current request (difficulty, style, length).
-
-## Error Codes
-If something goes wrong, the error message includes a code like `[EAI-G2001]`. Share this code when reporting issues — it encodes the provider, error category, and specific problem, making diagnosis much faster.
+When enabled (on by default), a rating popup appears after you accept/edit/deny a generation. Your ratings and optional text feedback are stored locally and injected into future AI prompts as examples — the AI learns what you like and avoids what you don't. 
 
 ## Fine-Tune Your Own Model
-The `training/` folder contains scripts to fine-tune a Qwen Instruct model on GD level data using QLoRA, then export it to Ollama. See [training/README.md](training/README.md) for details.
+Feel free to join our [Huggingface org](https://huggingface.co/EditorAI-Geode/) to publish your models trained on a EditorAI dataset.
 
 ## Support
 Join the [Editor AI Discord server](https://discord.gg/5hwCqMUYNj) for support and ideas.

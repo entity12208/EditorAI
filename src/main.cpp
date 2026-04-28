@@ -160,6 +160,7 @@ static std::string makeErrorCode(const std::string& provider, int category, int 
     else if (provider == "ollama")      p = 'L';
     else if (provider == "lm-studio")   p = 'S';
     else if (provider == "llama-cpp")   p = 'Y';
+    else if (provider == "openrouter")  p = 'R';
     return fmt::format("EAI-{}{:02d}{:02d}", p, category, specific);
 }
 
@@ -171,11 +172,14 @@ static std::string autoErrorCode(int category, int specific) {
 
 static std::pair<std::string, std::string> parseAPIError(const std::string& errorBody, int statusCode) {
     std::string title   = "API Error";
-    std::string message = "An unknown error occurred. Please try again.";
-    std::string code;
+    std::string code    = autoErrorCode(10, 99);
+    std::string message = fmt::format("[{}] An unknown error occurred. Please try again.", code);
     try {
         auto json = matjson::parse(errorBody);
-        if (!json) return {title, message};
+        if (!json) {
+            code = autoErrorCode(10, 98);
+            return {title, fmt::format("[{}] Could not parse error response.\n\n{}", code, errorBody.substr(0, 150))};
+        }
         auto error = json.unwrap();
         std::string errorMsg;
         std::string errorStatus; // Google APIs include a "status" string e.g. "PERMISSION_DENIED"
@@ -308,6 +312,7 @@ static std::string getProviderApiKey(const std::string& provider) {
     if (provider == "openai")       return Mod::get()->getSettingValue<std::string>("openai-api-key");
     if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-api-key");
     if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-api-key");
+    if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-api-key");
     return ""; // ollama / local — no key needed
 }
 
@@ -320,6 +325,7 @@ static std::string getProviderModel(const std::string& provider) {
     if (provider == "ollama")       return Mod::get()->getSettingValue<std::string>("ollama-model");
     if (provider == "lm-studio")    return Mod::get()->getSettingValue<std::string>("lm-studio-model");
     if (provider == "llama-cpp")    return Mod::get()->getSettingValue<std::string>("llama-cpp-model");
+    if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-model");
     return "unknown";
 }
 
@@ -840,6 +846,7 @@ class AISettingsPopup : public Popup {
 protected:
     SettingsTab m_currentTab = SettingsTab::General;
     CCNode*     m_contentLayer = nullptr;
+    CCScale9Sprite* m_panelBg = nullptr;
     std::vector<std::pair<std::string, TextInput*>> m_textInputs;
     std::vector<IntInputMeta> m_intInputs;
     std::vector<CCMenuItemSpriteExtra*> m_tabBtns;
@@ -849,9 +856,43 @@ protected:
     float m_rowY = 0;
     float m_labelX = 0;
     float m_valX = 0;
+    float m_textFieldWidth = 0;
+    float m_intFieldWidth = 0;
+    float m_rangeHintX = 0;
+
+    static const char* providerDisplayName(std::string const& provider) {
+        if (provider == "gemini") return "Google Gemini";
+        if (provider == "claude") return "Anthropic Claude";
+        if (provider == "openai") return "OpenAI";
+        if (provider == "openrouter") return "OpenRouter";
+        if (provider == "ministral") return "Mistral AI";
+        if (provider == "huggingface") return "Hugging Face";
+        if (provider == "ollama") return "Ollama";
+        if (provider == "lm-studio") return "LM Studio";
+        if (provider == "llama-cpp") return "llama.cpp";
+        return "Unknown";
+    }
+
+    static const char* tabTitle(SettingsTab tab) {
+        switch (tab) {
+            case SettingsTab::General: return "General Settings";
+            case SettingsTab::Provider: return "Provider Settings";
+            case SettingsTab::Advanced: return "Advanced Settings";
+        }
+        return "Settings";
+    }
+
+    static const char* tabSubtitle(SettingsTab tab) {
+        switch (tab) {
+            case SettingsTab::General: return "Choose the generation defaults used for new prompts.";
+            case SettingsTab::Provider: return "Configure the selected AI provider and its model details.";
+            case SettingsTab::Advanced: return "Fine-tune generation behavior and quality-of-life options.";
+        }
+        return "";
+    }
 
     bool init() override {
-        if (!Popup::init(360.f, 260.f))
+        if (!Popup::init(430.f, 350.f))
             return false;
 
         auto ws = this->m_size;
@@ -859,22 +900,30 @@ protected:
 
         // Tab buttons across the top
         auto tabMenu = CCMenu::create();
-        tabMenu->setPosition({ws.width / 2, ws.height / 2 + 85});
+        tabMenu->setPosition({ws.width / 2, ws.height / 2 + 130});
 
         const char* tabNames[] = {"General", "Provider", "Advanced"};
         for (int i = 0; i < 3; ++i) {
             bool active = (i == (int)m_currentTab);
             auto btn = CCMenuItemSpriteExtra::create(
                 ButtonSprite::create(tabNames[i], "bigFont.fnt",
-                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.4f),
+                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.45f),
                 this, menu_selector(AISettingsPopup::onTabSwitch)
             );
             btn->setTag(i);
-            btn->setPosition({(float)(i - 1) * 95.f, 0});
+            btn->setScale(active ? 1.f : 0.92f);
+            btn->setPosition({(float)(i - 1) * 112.f, 0});
             tabMenu->addChild(btn);
             m_tabBtns.push_back(btn);
         }
         m_mainLayer->addChild(tabMenu);
+
+        m_panelBg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
+        m_panelBg->setContentSize({390.f, 250.f});
+        m_panelBg->setColor({18, 24, 34});
+        m_panelBg->setOpacity(110);
+        m_panelBg->setPosition({ws.width / 2, ws.height / 2 - 4});
+        m_mainLayer->addChild(m_panelBg);
 
         // Content container
         m_contentLayer = CCNode::create();
@@ -922,10 +971,11 @@ protected:
             parent->removeChild(m_tabBtns[i], true);
             auto newBtn = CCMenuItemSpriteExtra::create(
                 ButtonSprite::create(tabNames[i], "bigFont.fnt",
-                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.4f),
+                    active ? "GJ_button_01.png" : "GJ_button_04.png", 0.45f),
                 this, menu_selector(AISettingsPopup::onTabSwitch)
             );
             newBtn->setTag(i);
+            newBtn->setScale(active ? 1.f : 0.92f);
             newBtn->setPosition(pos);
             parent->addChild(newBtn);
             m_tabBtns[i] = newBtn;
@@ -941,9 +991,23 @@ protected:
         m_intInputs.clear();
 
         auto ws = this->m_size;
-        m_rowY = ws.height / 2 + 60;
-        m_labelX = ws.width / 2 - 60;
-        m_valX = ws.width / 2 + 60;
+        m_rowY = ws.height / 2 + 46;
+        m_labelX = ws.width / 2 - 58;
+        m_valX = ws.width / 2 + 62;
+        m_textFieldWidth = 168.f;
+        m_intFieldWidth = 94.f;
+        m_rangeHintX = m_valX + 62.f;
+
+        auto header = CCLabelBMFont::create(tabTitle(tab), "goldFont.fnt");
+        header->setScale(0.55f);
+        header->setPosition({ws.width / 2, ws.height / 2 + 84});
+        m_contentLayer->addChild(header);
+
+        auto subtitle = CCLabelBMFont::create(tabSubtitle(tab), "bigFont.fnt");
+        subtitle->setScale(0.22f);
+        subtitle->setColor({180, 190, 205});
+        subtitle->setPosition({ws.width / 2, ws.height / 2 + 66});
+        m_contentLayer->addChild(subtitle);
 
         switch (tab) {
             case SettingsTab::General:  buildGeneralTab(); break;
@@ -959,6 +1023,7 @@ protected:
         lbl->setScale(0.3f);
         lbl->setAnchorPoint({1, 0.5f});
         lbl->setPosition({m_labelX, m_rowY});
+        lbl->setColor({225, 232, 240});
         m_contentLayer->addChild(lbl);
     }
 
@@ -967,7 +1032,7 @@ protected:
         addRowLabel(label);
         std::string current = Mod::get()->getSettingValue<std::string>(settingId);
         auto btn = CCMenuItemSpriteExtra::create(
-            ButtonSprite::create(current.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.4f),
+            ButtonSprite::create(current.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.38f),
             this, menu_selector(AISettingsPopup::onCycleSetting)
         );
         int idx = (int)s_cyclerInfos.size();
@@ -979,7 +1044,7 @@ protected:
         btn->setPosition({0, 0});
         menu->addChild(btn);
         m_contentLayer->addChild(menu);
-        m_rowY -= 30;
+        m_rowY -= 34;
     }
 
     void addToggle(const char* label, const char* settingId) {
@@ -987,7 +1052,7 @@ protected:
         bool val = Mod::get()->getSettingValue<bool>(settingId);
         auto btn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create(val ? "ON" : "OFF", "bigFont.fnt",
-                val ? "GJ_button_01.png" : "GJ_button_06.png", 0.4f),
+                val ? "GJ_button_01.png" : "GJ_button_06.png", 0.38f),
             this, menu_selector(AISettingsPopup::onCycleToggle)
         );
         int idx = (int)s_cyclerInfos.size();
@@ -999,45 +1064,48 @@ protected:
         btn->setPosition({0, 0});
         menu->addChild(btn);
         m_contentLayer->addChild(menu);
-        m_rowY -= 30;
+        m_rowY -= 34;
     }
 
     void addTextRow(const char* label, const char* settingId, const char* placeholder, int maxChars = 100) {
         addRowLabel(label);
 
         auto bg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
-        bg->setContentSize({155, 22});
-        bg->setColor({0, 0, 0});
-        bg->setOpacity(100);
+        bg->setContentSize({m_textFieldWidth, 26.f});
+        bg->setColor({8, 12, 18});
+        bg->setOpacity(120);
         bg->setPosition({m_valX, m_rowY});
         m_contentLayer->addChild(bg);
 
         std::string current = Mod::get()->getSettingValue<std::string>(settingId);
-        auto input = TextInput::create(145, placeholder, "bigFont.fnt");
+        auto input = TextInput::create(m_textFieldWidth - 12.f, placeholder, "bigFont.fnt");
         input->setPosition({m_valX, m_rowY});
-        input->setScale(0.45f);
+        input->setScale(0.46f);
         input->setMaxCharCount(maxChars);
+        if (std::string(settingId).find("api-key") != std::string::npos) {
+            input->setPasswordMode(true);
+        }
         if (!current.empty()) input->setString(current);
         m_contentLayer->addChild(input);
         m_textInputs.push_back({settingId, input});
-        m_rowY -= 30;
+        m_rowY -= 34;
     }
 
     void addIntRow(const char* label, const char* settingId, int64_t min, int64_t max, int64_t def) {
         addRowLabel(label);
 
         auto bg = CCScale9Sprite::create("square02b_001.png", {0, 0, 80, 80});
-        bg->setContentSize({80, 22});
-        bg->setColor({0, 0, 0});
-        bg->setOpacity(100);
-        bg->setPosition({m_valX - 20, m_rowY});
+        bg->setContentSize({m_intFieldWidth, 26.f});
+        bg->setColor({8, 12, 18});
+        bg->setOpacity(120);
+        bg->setPosition({m_valX - 10, m_rowY});
         m_contentLayer->addChild(bg);
 
         int64_t current = Mod::get()->getSettingValue<int64_t>(settingId);
-        auto input = TextInput::create(70, fmt::format("{}", def).c_str(), "bigFont.fnt");
-        input->setPosition({m_valX - 20, m_rowY});
-        input->setScale(0.45f);
-        input->setMaxCharCount(6);
+        auto input = TextInput::create(m_intFieldWidth - 12.f, fmt::format("{}", def).c_str(), "bigFont.fnt");
+        input->setPosition({m_valX - 10, m_rowY});
+        input->setScale(0.46f);
+        input->setMaxCharCount(7);
         input->getInputNode()->setAllowedChars("0123456789");
         input->setString(fmt::format("{}", current));
         m_contentLayer->addChild(input);
@@ -1046,43 +1114,53 @@ protected:
         // Range hint
         auto hint = CCLabelBMFont::create(
             fmt::format("{}-{}", min, max).c_str(), "bigFont.fnt");
-        hint->setScale(0.18f);
+        hint->setScale(0.16f);
         hint->setColor({150, 150, 150});
-        hint->setPosition({m_valX + 45, m_rowY});
+        hint->setAnchorPoint({0, 0.5f});
+        hint->setPosition({m_rangeHintX, m_rowY});
         m_contentLayer->addChild(hint);
 
-        m_rowY -= 30;
+        m_rowY -= 34;
     }
 
     void addInfoRow(const char* label, const std::string& value, ccColor3B color) {
         addRowLabel(label);
         auto lbl = CCLabelBMFont::create(value.c_str(), "bigFont.fnt");
-        lbl->setScale(0.25f);
+        lbl->setScale(0.26f);
         lbl->setColor(color);
-        lbl->setPosition({m_valX, m_rowY});
+        lbl->setAnchorPoint({0.f, 0.5f});
+        lbl->setPosition({m_valX - m_textFieldWidth / 2.f + 8.f, m_rowY});
         m_contentLayer->addChild(lbl);
-        m_rowY -= 30;
+        m_rowY -= 26;
+    }
+
+    void addNoteRow(const std::string& text, ccColor3B color = {150, 150, 150}, float scale = 0.18f) {
+        auto note = CCLabelBMFont::create(text.c_str(), "bigFont.fnt");
+        note->setScale(scale);
+        note->setColor(color);
+        note->setPosition({this->m_size.width / 2, m_rowY - 1});
+        m_contentLayer->addChild(note);
+        m_rowY -= 14;
     }
 
     // ── Tab builders ────────────────────────────────────────────────────
 
     void buildGeneralTab() {
         addCycler("Provider:", "ai-provider",
-            {"gemini", "claude", "openai", "ministral", "huggingface", "ollama", "lm-studio", "llama-cpp"});
-        addCycler("Difficulty:", "difficulty",
-            {"easy", "medium", "hard", "extreme"});
-        addCycler("Style:", "style",
-            {"modern", "retro", "minimalist", "decorated"});
-        addCycler("Length:", "length",
-            {"short", "medium", "long", "xl", "xxl"});
-        addIntRow("Max Objects:", "max-objects", 10, 10000, 500);
+            {"gemini", "claude", "openai", "openrouter", "ministral", "huggingface", "ollama", "lm-studio", "llama-cpp"});
+        addTextRow("Difficulty:", "difficulty", "easy/medium/hard/extreme or custom", 50);
+        addTextRow("Style:", "style", "modern/retro/flow/memory or custom", 50);
+        addTextRow("Length:", "length", "short/medium/long/xl/xxl or custom", 50);
+        addIntRow("Max Objects:", "max-objects", 10, 1000000, 500);
         addIntRow("Spawn Speed:", "spawn-batch-size", 1, 100, 8);
+        addNoteRow("Freeform text works best for style-heavy prompts.", {150, 170, 190}, 0.15f);
     }
 
     void buildProviderTab() {
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
 
-        addInfoRow("Provider:", provider, {100, 255, 100});
+        addInfoRow("Provider:", providerDisplayName(provider), {100, 255, 100});
+        addNoteRow("The provider tab changes based on the selected backend.", {165, 195, 235}, 0.15f);
 
         if (provider == "gemini") {
             addCycler("Model:", "gemini-model",
@@ -1101,6 +1179,10 @@ protected:
                 {"ministral-3b-latest", "ministral-8b-latest", "mistral-small-latest",
                  "mistral-medium-latest", "mistral-large-latest"});
             addTextRow("API Key:", "ministral-api-key", "Your Mistral AI key", 200);
+        } else if (provider == "openrouter") {
+            addTextRow("Model:", "openrouter-model", "e.g. google/gemini-2.5-flash", 200);
+            addTextRow("API Key:", "openrouter-api-key", "Your OpenRouter key", 200);
+            addNoteRow("openrouter.ai gives you one key for many hosted models.");
         } else if (provider == "huggingface") {
             addTextRow("Model:", "huggingface-model", "e.g. meta-llama/Llama-3.1-8B", 200);
             addTextRow("API Key:", "huggingface-api-key", "Your HuggingFace token", 200);
@@ -1122,34 +1204,16 @@ protected:
         } else if (provider == "lm-studio") {
             addTextRow("URL:", "lm-studio-url", "http://localhost:1234", 200);
             addTextRow("Model:", "lm-studio-model", "loaded model name", 200);
-
-            auto hint = CCLabelBMFont::create(
-                "Run LM Studio locally. Load a model, then start the server.",
-                "bigFont.fnt");
-            hint->setScale(0.18f);
-            hint->setColor({150, 150, 150});
-            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
-            m_contentLayer->addChild(hint);
+            addNoteRow("Run LM Studio locally, load a model, then start its server.");
         } else if (provider == "llama-cpp") {
             addTextRow("URL:", "llama-cpp-url", "http://localhost:8080", 200);
             addTextRow("Model:", "llama-cpp-model", "default", 200);
-
-            auto hint = CCLabelBMFont::create(
-                "Run: llama-server -m model.gguf --port 8080",
-                "bigFont.fnt");
-            hint->setScale(0.18f);
-            hint->setColor({150, 150, 150});
-            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
-            m_contentLayer->addChild(hint);
+            addNoteRow("Run llama-server with your GGUF model before connecting.");
         }
 
         // Hint about key security
         if (provider != "ollama") {
-            auto hint = CCLabelBMFont::create("Keys stored locally in Geode save data.", "bigFont.fnt");
-            hint->setScale(0.2f);
-            hint->setColor({150, 150, 150});
-            hint->setPosition({this->m_size.width / 2, m_rowY - 8});
-            m_contentLayer->addChild(hint);
+            addNoteRow("Keys stay on this device in Geode save data.", {150, 170, 190}, 0.15f);
         }
     }
 
@@ -1159,6 +1223,7 @@ protected:
         addIntRow("Rate Limit (s):", "rate-limit-seconds", 1, 60, 3);
         addToggle("Rate Generations:", "enable-rating");
         addIntRow("Feedback Examples:", "max-feedback-examples", 1, 10, 3);
+        addNoteRow("Leave rate limiting on if you are using hosted APIs.", {150, 170, 190}, 0.15f);
     }
 
     // ── Ollama auto-detect ──────────────────────────────────────────────
@@ -1255,7 +1320,7 @@ protected:
         parent->removeChild(btn, true);
 
         auto newBtn = CCMenuItemSpriteExtra::create(
-            ButtonSprite::create(next.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.4f),
+            ButtonSprite::create(next.c_str(), "bigFont.fnt", "GJ_button_04.png", 0.38f),
             this, menu_selector(AISettingsPopup::onCycleSetting)
         );
         newBtn->setTag(idx);
@@ -1295,7 +1360,7 @@ protected:
 
         auto newBtn = CCMenuItemSpriteExtra::create(
             ButtonSprite::create(next ? "ON" : "OFF", "bigFont.fnt",
-                next ? "GJ_button_01.png" : "GJ_button_06.png", 0.4f),
+                next ? "GJ_button_01.png" : "GJ_button_06.png", 0.38f),
             this, menu_selector(AISettingsPopup::onCycleToggle)
         );
         newBtn->setTag(idx);
@@ -2216,12 +2281,28 @@ protected:
             "  EASY=50-70  MEDIUM=30-50  HARD=20-30  EXTREME=10-20\n\n"
             "LEVEL LENGTH (total X span):\n"
             "  SHORT=200-400  MEDIUM=400-800  LONG=800-1600  XL=1600-3200  XXL=3200+\n\n"
+            "COMMON LEVEL STYLES (the user may request these by name):\n"
+            "  MODERN — clean geometric shapes, smooth color transitions, polished triggers\n"
+            "  RETRO — classic GD style, grid-patterned blocks, simple spike placement\n"
+            "  MINIMALIST — black/white, few decorations, focus on pure gameplay\n"
+            "  DECORATED — heavy decoration, gears, chains, clouds, visual effects\n"
+            "  FLOW — smooth continuous movement, gentle curves, consistent rhythm, no abrupt stops\n"
+            "  MEMORY — repeating patterns the player must memorize, tight timing with callbacks\n"
+            "  WAVE — intense wave gameplay sections, narrow corridors, rapid direction changes\n"
+            "  SHIP — ship/flying sections with gravity portals, precise vertical navigation\n"
+            "  NINE CIRCLES — flashing colors with wave sections, pulse triggers, intense visuals\n"
+            "  HELL — extreme spike density, sawblades everywhere, minimal safe zones\n"
+            "  AUTO — the player doesn't need to click, objects form a visual path\n"
+            "  BOSSFIGHT — dramatic build-up, intense trigger sequences, screen effects\n"
+            "  SPEEDCORE — very fast speed portals, wide obstacle spacing for fast gameplay\n"
+            "  AMBIENT — atmospheric, lots of alpha fading, slow color transitions, calm\n\n"
             "RULES:\n"
             "  - Only use type names from the available objects list above. Never invent new names.\n"
             "  - Y must be >= 0. Never place objects with negative Y.\n"
             "  - Vary object types to create interesting, playable layouts.\n"
             "  - A spike or hazard sitting on the ground has Y=0.\n"
-            "  - Platforms and blocks used as stepping stones should be at Y=10 or Y=20.",
+            "  - Platforms and blocks used as stepping stones should be at Y=10 or Y=20.\n"
+            "  - Match the requested style — a 'flow' level should feel smooth, a 'hell' level should be brutal.",
             objectList
         );
 
@@ -2623,6 +2704,24 @@ protected:
 
             url = "https://router.huggingface.co/v1/chat/completions";
 
+        // ── OpenRouter (OpenAI-compatible, 300+ models) ──────────────────────
+        } else if (provider == "openrouter") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                          = matjson::Value::object();
+            requestBody["model"]                 = model;
+            requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_tokens"]            = 16384;
+            requestBody["temperature"]           = 0.7;
+
+            url = "https://openrouter.ai/api/v1/chat/completions";
+
         // ── LM Studio (OpenAI-compatible local server) ─────────────────────────
         } else if (provider == "lm-studio") {
             auto sysMsg  = matjson::Value::object();
@@ -2697,6 +2796,13 @@ protected:
             request.header("anthropic-version", "2023-06-01");
         } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
+        } else if (provider == "openrouter") {
+            log::info("OpenRouter key length: {}, starts with: {}", apiKey.length(),
+                apiKey.length() > 8 ? apiKey.substr(0, 8) + "..." : "(empty)");
+            request.header("Authorization", fmt::format("Bearer {}", apiKey));
+            request.header("authorization", fmt::format("Bearer {}", apiKey));
+            request.header("Referer", "https://editorai.pages.dev");
+            request.header("X-Title", "EditorAI");
         } else if (provider == "lm-studio" || provider == "llama-cpp") {
             // Local servers — no auth needed, generous timeout
             request.timeout(std::chrono::seconds(300));
@@ -2957,7 +3063,7 @@ protected:
 
                 // OpenAI, Mistral AI, and HuggingFace all use the same response format
                 } else if (provider == "openai" || provider == "ministral" || provider == "huggingface"
-                        || provider == "lm-studio" || provider == "llama-cpp") {
+                        || provider == "openrouter" || provider == "lm-studio" || provider == "llama-cpp") {
                     auto choices = json["choices"];
                     if (!choices.isArray() || choices.size() == 0) {
                         onError("No Response", fmt::format("[{}] The AI returned no content.", autoErrorCode(60, 4))); return;
