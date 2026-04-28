@@ -332,7 +332,7 @@ static std::string getProviderModel(const std::string& provider) {
 static std::string getOllamaUrl() {
     bool usePlatinum = Mod::get()->getSettingValue<bool>("use-platinum");
     return usePlatinum
-        ? "https://ollama-proxy-sh88.onrender.com"
+        ? "http://sn-1.vltgg.net:21800"
         : "http://localhost:11434";
 }
 
