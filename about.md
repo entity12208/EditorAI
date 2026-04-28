@@ -14,7 +14,7 @@ AI-powered level generation for Geometry Dash. Describe your level in plain text
 
 All settings are configured in-game via the **gear icon** in the AI popup.
 
-### EditorAI Platinum *(Free - servers WIP)*
+### EditorAI Platinum *(Free - thanks to [VLTGG](https://vltgg.net) for the servers!)*
 [EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a community proxy that lets anyone run the official EditorAI Ollama models over the internet for free (subject to availability).
 
 1. Open settings → set **Provider** to `ollama`
