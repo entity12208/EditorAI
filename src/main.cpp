@@ -147,16 +147,22 @@ static bool parseHexColor(const std::string& hex, GLubyte& r, GLubyte& g, GLubyt
 //   70 = Generation errors (valid data but unusable)
 //   80 = Ollama-specific errors
 //
+// Provider prefixes:
+//   G = Gemini, C = Claude, O = OpenAI, M = Mistral, H = HuggingFace,
+//   D = DeepSeek, R = OpenRouter, S = LM Studio, Y = llama.cpp, L = Ollama
+//
 // The error code encodes: provider initial + category + specific error
 
 static std::string makeErrorCode(const std::string& provider, int category, int specific) {
-    // Provider prefix: G=gemini, C=claude, O=openai, M=mistral, H=huggingface, L=ollama, X=unknown
+    // Provider prefix: G=gemini, C=claude, O=openai, M=mistral, H=huggingface,
+    //                  D=deepseek, L=ollama, S=lm-studio, Y=llama-cpp, R=openrouter, X=unknown
     char p = 'X';
     if (provider == "gemini")      p = 'G';
     else if (provider == "claude")      p = 'C';
     else if (provider == "openai")      p = 'O';
     else if (provider == "ministral")   p = 'M';
     else if (provider == "huggingface") p = 'H';
+    else if (provider == "deepseek")    p = 'D';
     else if (provider == "ollama")      p = 'L';
     else if (provider == "lm-studio")   p = 'S';
     else if (provider == "llama-cpp")   p = 'Y';
@@ -313,6 +319,7 @@ static std::string getProviderApiKey(const std::string& provider) {
     if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-api-key");
     if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-api-key");
     if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-api-key");
+    if (provider == "deepseek")     return Mod::get()->getSettingValue<std::string>("deepseek-api-key");
     return ""; // ollama / local — no key needed
 }
 
@@ -326,6 +333,7 @@ static std::string getProviderModel(const std::string& provider) {
     if (provider == "lm-studio")    return Mod::get()->getSettingValue<std::string>("lm-studio-model");
     if (provider == "llama-cpp")    return Mod::get()->getSettingValue<std::string>("llama-cpp-model");
     if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-model");
+    if (provider == "deepseek")     return Mod::get()->getSettingValue<std::string>("deepseek-model");
     return "unknown";
 }
 
@@ -870,6 +878,7 @@ protected:
         if (provider == "ollama") return "Ollama";
         if (provider == "lm-studio") return "LM Studio";
         if (provider == "llama-cpp") return "llama.cpp";
+        if (provider == "deepseek") return "DeepSeek";
         return "Unknown";
     }
 
@@ -1147,7 +1156,7 @@ protected:
 
     void buildGeneralTab() {
         addCycler("Provider:", "ai-provider",
-            {"gemini", "claude", "openai", "openrouter", "ministral", "huggingface", "ollama", "lm-studio", "llama-cpp"});
+            {"gemini", "claude", "openai", "openrouter", "ministral", "huggingface", "deepseek", "ollama", "lm-studio", "llama-cpp"});
         addTextRow("Difficulty:", "difficulty", "easy/medium/hard/extreme or custom", 50);
         addTextRow("Style:", "style", "modern/retro/flow/memory or custom", 50);
         addTextRow("Length:", "length", "short/medium/long/xl/xxl or custom", 50);
@@ -1209,6 +1218,11 @@ protected:
             addTextRow("URL:", "llama-cpp-url", "http://localhost:8080", 200);
             addTextRow("Model:", "llama-cpp-model", "default", 200);
             addNoteRow("Run llama-server with your GGUF model before connecting.");
+        } else if (provider == "deepseek") {
+            addCycler("Model:", "deepseek-model",
+                {"deepseek-chat", "deepseek-reasoner", "deepseek-coder"});
+            addTextRow("API Key:", "deepseek-api-key", "Your DeepSeek key", 200);
+            addNoteRow("Get your key at platform.deepseek.com");
         }
 
         // Hint about key security
@@ -2722,6 +2736,24 @@ protected:
 
             url = "https://openrouter.ai/api/v1/chat/completions";
 
+        // ── DeepSeek (OpenAI-compatible API) ─────────────────────────────────
+        } else if (provider == "deepseek") {
+            auto sysMsg  = matjson::Value::object();
+            sysMsg["role"]    = "system";
+            sysMsg["content"] = systemPrompt;
+
+            auto userMsg = matjson::Value::object();
+            userMsg["role"]    = "user";
+            userMsg["content"] = fullPrompt;
+
+            requestBody                          = matjson::Value::object();
+            requestBody["model"]                 = model;
+            requestBody["messages"]              = std::vector<matjson::Value>{sysMsg, userMsg};
+            requestBody["max_tokens"]            = 8192;
+            requestBody["temperature"]           = 0.7;
+
+            url = "https://api.deepseek.com/v1/chat/completions";
+
         // ── LM Studio (OpenAI-compatible local server) ─────────────────────────
         } else if (provider == "lm-studio") {
             auto sysMsg  = matjson::Value::object();
@@ -2794,7 +2826,7 @@ protected:
         } else if (provider == "claude") {
             request.header("x-api-key", apiKey);
             request.header("anthropic-version", "2023-06-01");
-        } else if (provider == "openai" || provider == "ministral" || provider == "huggingface") {
+        } else if (provider == "openai" || provider == "ministral" || provider == "huggingface" || provider == "deepseek") {
             request.header("Authorization", fmt::format("Bearer {}", apiKey));
         } else if (provider == "openrouter") {
             log::info("OpenRouter key length: {}, starts with: {}", apiKey.length(),

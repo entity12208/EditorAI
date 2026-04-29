@@ -43,6 +43,8 @@
     "huggingface-api-key":      { "type": "string", "default": "" },
     "openrouter-model":         { "type": "string", "default": "google/gemini-2.5-flash" },
     "openrouter-api-key":       { "type": "string", "default": "" },
+    "deepseek-model":           { "type": "string", "default": "deepseek-chat" },
+    "deepseek-api-key":         { "type": "string", "default": "" },
     "use-platinum":             { "type": "bool",   "default": false },
     "ollama-model":             { "type": "string", "default": "entity12208/editorai:deepseek" },
     "ollama-timeout":           { "type": "int",    "default": 600, "min": 60, "max": 1800 },
