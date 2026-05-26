@@ -17,7 +17,7 @@
   "incompatibilities": {
     "alk.editor-collab": {
       "breaking": false,
-      "version": "*"
+      "version": "2.20-alapha"
     }
   },
   "settings": {
