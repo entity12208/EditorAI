@@ -105,3 +105,6 @@ Feel free to join our [Huggingface org](https://huggingface.co/EditorAI-Geode/) 
 
 ## Support
 Join the [Editor AI Discord server](https://discord.gg/5hwCqMUYNj) for support and ideas.
+## Api
+the api is hosted by voidcat14
+voidcat14 here i been working on it its in python its not done alomost if you wnat it i will make a repo for it
