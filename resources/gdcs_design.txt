@@ -1,0 +1,93 @@
+GD CREATOR SCHOOL — compact design reference
+Source: https://www.gdcreatorschool.com  (community-authored)
+
+This file is the single design-knowledge corpus the mod ships to the model.
+It supersedes the older gdcs_tips.txt and gdcs_guides.txt.
+
+═══ PLANNING ════════════════════════════════════════════════════════════
+- Pick difficulty FIRST, then pace gameplay to match. Easy levels space
+  obstacles loosely; harder levels demand precise reaction timing.
+- Build in passes: gameplay first, then decoration, then triggers.
+  Decoration follows the layout — it never drives it.
+- Each "section" commits to ONE theme (spike-jumps, ship-flying,
+  wave-tunnels, dual-cube, etc.) and finishes it before switching.
+
+═══ GAMEPLAY ════════════════════════════════════════════════════════════
+- Never surprise the player with hazards they couldn't see coming.
+- Vary segment LENGTH: alternate short tense bursts with longer breather
+  runs. Walls of identical patterns read as boring.
+- Orbs / pads belong AT THE EXACT TAP POINT. Pre-place an orb 30-60 units
+  BEFORE the obstacle it bypasses, not on top of it.
+- For platformer sections, mark safe landings with contrasting blocks —
+  not decoration. Player must be able to read the path at speed.
+- Minimum 90 units between two jump obstacles at base speed.
+
+═══ DIFFICULTY CURVE ═══════════════════════════════════════════════════
+- Don't open with the hardest obstacle. Ramp: ~30% easy intro,
+  ~50% main challenge, ~20% climax/final pattern.
+- A consistent "feel" matters more than raw difficulty. Mixing easy
+  + insane in the same section is jarring.
+
+═══ DECORATION ═════════════════════════════════════════════════════════
+- Less is more. Heavy decoration distracts from gameplay reading.
+- A scene change swaps 3-5 color channels AT ONCE (group them).
+- Backgrounds COMPLEMENT the gameplay color; they never compete with it.
+- Keep total color channels per section under ~10 — more reads chaotic.
+
+═══ TECHNICAL ══════════════════════════════════════════════════════════
+- GD ground row is Y=15 in raw coords; the mod uses Y=105 in editor space
+  as the visible ground line. Build UP from there.
+- Snap to grid (multiples of 30 units) for everything except deliberate
+  pixel art. Sub-grid offsets read as misaligned.
+- Triggers fire when their X is crossed (or when their target object is
+  touched, for touch triggers). Place triggers slightly BEFORE the
+  effect should visibly start, so the player sees a clean transition.
+
+═══ Z LAYER / Z ORDER ══════════════════════════════════════════════════
+- Z LAYER: T1..T4 render ABOVE the player icon; B1..B4 render BELOW.
+  Default for blocks is B2; decoration usually goes T1/T2 or B3/B4.
+- Z ORDER: a number; higher draws in front WITHIN the same Z layer.
+  Z Layer outranks Z Order across layers.
+- Blending objects always sit below non-blending objects of the same
+  Z layer, regardless of tileset.
+
+═══ GROUPS & TRIGGERS ══════════════════════════════════════════════════
+- Up to 10 groups per object. Groups are how triggers target objects.
+- For animations: give the moving objects a group, set ONE object as
+  "Group Parent" so rotate/scale pivots around it.
+- Common Extra-Tab-1 flags worth knowing:
+   * Passable      — player can pass through from bottom/side (one-way
+                     platforms).
+   * NoTouch       — strips collision; converts an object to pure decor.
+   * High Detail   — disappears under Low Detail Mode; use for heavy
+                     filigree decoration so low-end devices stay smooth.
+   * Don't Fade /
+     Don't Enter   — disables the screen-edge enter animation.
+   * NoGlow        — removes the static-object outline glow.
+   * IceBlock /
+     GripSlope    — platformer surface feel.
+
+═══ COLOR ══════════════════════════════════════════════════════════════
+- Every static object has a Base channel; some also a Detail channel.
+- Color channels 1-999 are user-customizable; P-Col 1/2, Light BG, and
+  Default are reserved. Gameplay objects (orbs, portals, pads) can't be
+  recolored directly — group them and pulse-trigger color instead.
+- Use "Next Free" to pick an unused channel.
+- HSV adjusts an object's color RELATIVE to its channel — great for
+  shading without burning a fresh channel per shade.
+
+═══ COMMON MISTAKES TO AVOID ═══════════════════════════════════════════
+- Spamming identical objects (same type, same Y) for hundreds of units.
+- Sub-90-unit gaps between obstacles the player must jump between.
+- Placing decoration ON TOP of gameplay objects so the path is hidden.
+- Using >10 color channels in one section.
+- Triggers fired AT the moment of effect instead of slightly before.
+- Forgetting a clear visual cue at section transitions.
+
+═══ STRUCTURE CONVENTIONS THIS MOD EXPECTS ═════════════════════════════
+- FLOOR / CEILING / PILLAR / CORRIDOR / SPIKE-TRAIN macros expand to
+  many objects from a single line. Prefer them over emitting individual
+  blocks when the shape is repetitive.
+- Default ground Y = 105 (set via ai-ground-y). Spike-trains sit on it.
+- META and SECTION lines are free metadata; the parser tolerates them
+  missing. The same is true for the analysis field in JSON output.

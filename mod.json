@@ -8,7 +8,7 @@
   },
   "id": "entity12208.edit-ai",
   "name": "Editor AI",
-  "version": "v2.1.9",
+  "version": "v3.0.0",
   "developer": "entity12208",
   "description": "Generate Geometry Dash levels using AI!",
   "dependencies": {
@@ -21,42 +21,379 @@
     }
   },
   "settings": {
-    "info-setting": {
+    "_general-header": {
       "type": "title",
-      "name": "All settings are configured in-game via the gear icon in the AI popup."
+      "name": "General"
     },
-    "ai-provider":              { "type": "string", "default": "gemini" },
-    "difficulty":               { "type": "string", "default": "medium" },
-    "style":                    { "type": "string", "default": "modern" },
-    "length":                   { "type": "string", "default": "medium" },
-    "max-objects":              { "type": "int",    "default": 500, "min": 10, "max": 1000000 },
-    "spawn-batch-size":         { "type": "int",    "default": 8,   "min": 1,  "max": 100 },
-    "gemini-model":             { "type": "string", "default": "gemini-2.5-flash" },
-    "gemini-api-key":           { "type": "string", "default": "" },
-    "claude-model":             { "type": "string", "default": "claude-sonnet-4-6" },
-    "claude-api-key":           { "type": "string", "default": "" },
-    "openai-model":             { "type": "string", "default": "gpt-4o" },
-    "openai-api-key":           { "type": "string", "default": "" },
-    "ministral-model":          { "type": "string", "default": "ministral-8b-latest" },
-    "ministral-api-key":        { "type": "string", "default": "" },
-    "huggingface-model":        { "type": "string", "default": "meta-llama/Llama-3.1-8B-Instruct" },
-    "huggingface-api-key":      { "type": "string", "default": "" },
-    "openrouter-model":         { "type": "string", "default": "google/gemini-2.5-flash" },
-    "openrouter-api-key":       { "type": "string", "default": "" },
-    "deepseek-model":           { "type": "string", "default": "deepseek-chat" },
-    "deepseek-api-key":         { "type": "string", "default": "" },
-    "use-platinum":             { "type": "bool",   "default": false },
-    "ollama-model":             { "type": "string", "default": "entity12208/editorai:deepseek" },
-    "ollama-timeout":           { "type": "int",    "default": 600, "min": 60, "max": 1800 },
-    "lm-studio-url":            { "type": "string", "default": "http://localhost:1234" },
-    "lm-studio-model":          { "type": "string", "default": "default" },
-    "llama-cpp-url":            { "type": "string", "default": "http://localhost:8080" },
-    "llama-cpp-model":          { "type": "string", "default": "default" },
-    "enable-rate-limiting":     { "type": "bool",   "default": true },
-    "rate-limit-seconds":       { "type": "int",    "default": 3,   "min": 1,  "max": 60 },
-    "enable-advanced-features": { "type": "bool",   "default": false },
-    "enable-rating":            { "type": "bool",   "default": true },
-    "max-feedback-examples":    { "type": "int",    "default": 3,   "min": 1,  "max": 10 }
+    "ai-provider": {
+      "type": "string",
+      "default": "gemini",
+      "name": "AI Provider",
+      "description": "Which backend to call. Configure the matching section below.",
+      "one-of": [
+        "gemini",
+        "claude",
+        "openai",
+        "openrouter",
+        "ministral",
+        "huggingface",
+        "deepseek",
+        "ollama",
+        "lm-studio",
+        "llama-cpp",
+        "custom"
+      ]
+    },
+    "difficulty": {
+      "type": "string",
+      "default": "medium",
+      "name": "Difficulty",
+      "description": "Target difficulty for the AI. Canned values: easy / medium / hard / extreme. Free-form text is also accepted (e.g. 'demon', 'tutorial')."
+    },
+    "style": {
+      "type": "string",
+      "default": "modern",
+      "name": "Style",
+      "description": "Visual / gameplay style. Canned values: modern / retro / flow / memory. Free-form text is also accepted."
+    },
+    "length": {
+      "type": "string",
+      "default": "medium",
+      "name": "Length",
+      "description": "Approximate level length. Canned values: short / medium / long / xl / xxl. Free-form text is also accepted."
+    },
+    "max-objects": {
+      "type": "int",
+      "default": 500,
+      "min": 10,
+      "max": 1000000,
+      "name": "Max Objects",
+      "description": "Upper bound on objects the AI may emit per generation."
+    },
+    "spawn-batch-size": {
+      "type": "int",
+      "default": 8,
+      "min": 1,
+      "max": 100,
+      "name": "Spawn Speed",
+      "description": "Objects placed per editor tick during preview. Higher = faster but jankier."
+    },
+    "ai-ground-y": {
+      "type": "int",
+      "default": 105,
+      "min": 15,
+      "max": 300,
+      "name": "Ground Y",
+      "description": "Editor Y of the visible ground line. 105 is default. Lower if blocks float; higher if they bury."
+    },
+
+    "_provider-header": {
+      "type": "title",
+      "name": "Provider — Gemini"
+    },
+    "gemini-model": {
+      "type": "string",
+      "default": "gemini-2.5-flash",
+      "name": "Gemini Model",
+      "one-of": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
+      ]
+    },
+    "gemini-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "Gemini API Key",
+      "description": "From Google AI Studio. Stays on this device in Geode save data."
+    },
+
+    "_provider-claude": {
+      "type": "title",
+      "name": "Provider — Claude"
+    },
+    "claude-model": {
+      "type": "string",
+      "default": "claude-sonnet-4-6",
+      "name": "Claude Model",
+      "one-of": [
+        "claude-sonnet-4-6",
+        "claude-opus-4-6"
+      ]
+    },
+    "claude-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "Claude API Key",
+      "description": "From console.anthropic.com. Stays on this device."
+    },
+
+    "_provider-openai": {
+      "type": "title",
+      "name": "Provider — OpenAI"
+    },
+    "openai-model": {
+      "type": "string",
+      "default": "gpt-4o",
+      "name": "OpenAI Model",
+      "one-of": [
+        "gpt-4o",
+        "gpt-4.1-mini"
+      ]
+    },
+    "openai-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "OpenAI API Key",
+      "description": "From platform.openai.com. Stays on this device."
+    },
+
+    "_provider-mistral": {
+      "type": "title",
+      "name": "Provider — Mistral"
+    },
+    "ministral-model": {
+      "type": "string",
+      "default": "ministral-8b-latest",
+      "name": "Mistral Model",
+      "one-of": [
+        "ministral-3b-latest",
+        "ministral-8b-latest",
+        "mistral-small-latest",
+        "mistral-medium-latest",
+        "mistral-large-latest"
+      ]
+    },
+    "ministral-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "Mistral API Key",
+      "description": "From console.mistral.ai. Stays on this device."
+    },
+
+    "_provider-hf": {
+      "type": "title",
+      "name": "Provider — Hugging Face"
+    },
+    "huggingface-model": {
+      "type": "string",
+      "default": "meta-llama/Llama-3.1-8B-Instruct",
+      "name": "HF Model",
+      "description": "Repo-style id, e.g. meta-llama/Llama-3.1-8B-Instruct."
+    },
+    "huggingface-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "HF Token",
+      "description": "From huggingface.co/settings/tokens. Stays on this device."
+    },
+
+    "_provider-openrouter": {
+      "type": "title",
+      "name": "Provider — OpenRouter"
+    },
+    "openrouter-model": {
+      "type": "string",
+      "default": "google/gemini-2.5-flash",
+      "name": "OpenRouter Model",
+      "description": "Provider/model slug, e.g. google/gemini-2.5-flash or anthropic/claude-3.5-sonnet."
+    },
+    "openrouter-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "OpenRouter API Key",
+      "description": "From openrouter.ai/keys. One key, many hosted models."
+    },
+
+    "_provider-deepseek": {
+      "type": "title",
+      "name": "Provider — DeepSeek"
+    },
+    "deepseek-model": {
+      "type": "string",
+      "default": "deepseek-chat",
+      "name": "DeepSeek Model",
+      "one-of": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-coder"
+      ]
+    },
+    "deepseek-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "DeepSeek API Key",
+      "description": "From platform.deepseek.com."
+    },
+
+    "_provider-ollama": {
+      "type": "title",
+      "name": "Provider — Ollama"
+    },
+    "use-platinum": {
+      "type": "bool",
+      "default": false,
+      "name": "Use Platinum",
+      "description": "Route Ollama requests through the EditorAI Platinum cloud proxy instead of localhost."
+    },
+    "ollama-model": {
+      "type": "string",
+      "default": "entity12208/editorai:deepseek",
+      "name": "Ollama Model Tag",
+      "description": "Tag as shown by `ollama list`. e.g. entity12208/editorai:v3-7b."
+    },
+    "ollama-timeout": {
+      "type": "int",
+      "default": 600,
+      "min": 60,
+      "max": 1800,
+      "name": "Ollama Timeout (s)",
+      "description": "How long to wait for a local Ollama response before giving up."
+    },
+
+    "_provider-lmstudio": {
+      "type": "title",
+      "name": "Provider — LM Studio"
+    },
+    "lm-studio-url": {
+      "type": "string",
+      "default": "http://localhost:1234",
+      "name": "LM Studio URL"
+    },
+    "lm-studio-model": {
+      "type": "string",
+      "default": "default",
+      "name": "LM Studio Model",
+      "description": "Loaded model name in LM Studio. Start the server before generating."
+    },
+
+    "_provider-llamacpp": {
+      "type": "title",
+      "name": "Provider — llama.cpp"
+    },
+    "llama-cpp-url": {
+      "type": "string",
+      "default": "http://localhost:8080",
+      "name": "llama.cpp URL"
+    },
+    "llama-cpp-model": {
+      "type": "string",
+      "default": "default",
+      "name": "llama.cpp Model",
+      "description": "Model name (often 'default' unless your server expects something specific)."
+    },
+
+    "_provider-custom": {
+      "type": "title",
+      "name": "Provider — Custom (BYOPAK)"
+    },
+    "custom-provider-name": {
+      "type": "string",
+      "default": "Custom Provider",
+      "name": "Display Name",
+      "description": "Cosmetic only. Shown in the AI popup info panel."
+    },
+    "custom-provider-url": {
+      "type": "string",
+      "default": "",
+      "name": "Endpoint URL",
+      "description": "Base URL or full /chat/completions URL. OpenAI-compatible bodies are used."
+    },
+    "custom-provider-api-key": {
+      "type": "string",
+      "default": "",
+      "name": "API Key",
+      "description": "Leave blank if your server needs no auth."
+    },
+    "custom-provider-model": {
+      "type": "string",
+      "default": "",
+      "name": "Model",
+      "description": "Model name expected by your endpoint."
+    },
+    "custom-provider-auth": {
+      "type": "string",
+      "default": "Authorization: Bearer ${KEY}",
+      "name": "Auth Header Template",
+      "description": "${KEY} is replaced with your API key. Clear to send no header."
+    },
+
+    "_advanced-header": {
+      "type": "title",
+      "name": "Advanced"
+    },
+    "compact-prompts": {
+      "type": "bool",
+      "default": true,
+      "name": "Compact Prompts",
+      "description": "Default ON. Sends a ~3 KB system prompt (vs the full ~60 KB). Cuts cost by ~10× on hosted APIs and runs cleanly on 8K-context local models. Turn off only if you have a >32K-context model and want the full EAS spec + 3,986-entry object catalog in-prompt."
+    },
+    "enable-ai-tools": {
+      "type": "bool",
+      "default": true,
+      "name": "Enable AI Tools",
+      "description": "Let the AI call helper tools (web search, level analysis, song lookup, etc.) before composing."
+    },
+    "ai-tools-max-iterations": {
+      "type": "int",
+      "default": 6,
+      "min": 1,
+      "max": 12,
+      "name": "Tool-Use Iterations",
+      "description": "Max tool-call rounds before forcing a final answer."
+    },
+    "enable-advanced-features": {
+      "type": "bool",
+      "default": false,
+      "name": "Triggers & Colors",
+      "description": "Allow the AI to emit color/move/pulse triggers and group IDs."
+    },
+    "enable-rate-limiting": {
+      "type": "bool",
+      "default": true,
+      "name": "Rate Limiting",
+      "description": "Throttle generations. Leave on for hosted APIs to avoid quota burns."
+    },
+    "rate-limit-seconds": {
+      "type": "int",
+      "default": 3,
+      "min": 1,
+      "max": 60,
+      "name": "Rate Limit (s)",
+      "description": "Minimum seconds between generations when rate limiting is on."
+    },
+    "show-ai-output": {
+      "type": "bool",
+      "default": false,
+      "name": "Show AI Output",
+      "description": "Log the raw AI response for debugging. Off by default."
+    },
+    "enable-rating": {
+      "type": "bool",
+      "default": true,
+      "name": "Rate Generations",
+      "description": "Show the thumbs up/down rating prompt after generation."
+    },
+    "max-feedback-examples": {
+      "type": "int",
+      "default": 3,
+      "min": 1,
+      "max": 10,
+      "name": "Feedback Examples",
+      "description": "How many past rated generations to use as few-shot context."
+    },
+    "refinement-rounds": {
+      "type": "int",
+      "default": 3,
+      "min": 0,
+      "max": 10,
+      "name": "Refinement Rounds",
+      "description": "How many self-review passes the AI runs after the initial draft. 0 disables refinement."
+    }
+  },
+  "resources": {
+    "files": [
+      "resources/object_ids.json"
+    ]
   },
   "tags": [
     "editor",
