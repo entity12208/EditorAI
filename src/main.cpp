@@ -8,10 +8,11 @@
 #include <Geode/Geode.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 // cocos2d's pre-linked zlib wrapper (ZipUtils::ccInflateMemory) is used to
-// decompress gzip-encoded level data fetched from the GD servers. base64.h
-// gives us base64Decode for the URL-safe-base64 wrapper around k4.
+// decompress gzip-encoded level data fetched from the GD servers.
+// Base64 goes through Geode's own utils/base64 (GEODE_DLL, exported from the
+// loader on EVERY platform) — cocos2d::base64Decode is NOT exported on
+// macOS/iOS and fails to link there.
 #include <Geode/cocos/support/zip_support/ZipUtils.h>
-#include <Geode/cocos/support/base64.h>
 #include <Geode/utils/base64.hpp>
 #include <span>
 // ── BEGIN inlined headers (formerly src/json_lenient.hpp, src/example_sections_data.hpp, src/tool_use.hpp) ─────────
@@ -2279,20 +2280,19 @@ static bool parseHexColor(const std::string& hex, GLubyte& r, GLubyte& g, GLubyt
 // can be missing.
 static std::vector<unsigned char> urlSafeBase64Decode(std::string input) {
     if (input.empty()) return {};
+    // Normalize any standard-alphabet chars to URL-safe so either form decodes
+    // (callers pass URL-safe, but be lenient). Geode's Url variant reads the
+    // - / _ alphabet and ignores padding, so no manual '=' padding is needed.
     for (auto& c : input) {
-        if (c == '-') c = '+';
-        else if (c == '_') c = '/';
+        if (c == '+') c = '-';
+        else if (c == '/') c = '_';
     }
-    while (input.size() % 4 != 0) input += '=';
-    unsigned char* out = nullptr;
-    int len = cocos2d::base64Decode(
-        reinterpret_cast<unsigned char*>(const_cast<char*>(input.data())),
-        (unsigned int)input.size(), &out);
-    if (len <= 0 || !out) return {};
-    std::vector<unsigned char> v(out, out + len);
-    // cocos2d's base64Decode mallocs the buffer — free with std::free.
-    std::free(out);
-    return v;
+    // Geode's base64 is implemented in the loader and links on every platform
+    // (unlike cocos2d::base64Decode, which is missing on macOS/iOS).
+    auto res = geode::utils::base64::decode(
+        input, geode::utils::base64::Base64Variant::Url);
+    if (!res) return {};                      // never unwrap an unchecked Result
+    return std::move(res).unwrap();           // vector<uint8_t> == vector<unsigned char>
 }
 
 // Inflate a gzip-or-zlib buffer using cocos2d-x's pre-linked zlib wrapper.
