@@ -1,107 +1,58 @@
 # Editor AI
-AI-powered level generation for Geometry Dash. Describe your level in plain text and watch AI build it in the editor.
 
-*Consider supporting the project by starring it on [GitHub](https://github.com/entity12208/editorai)*
+Describe a Geometry Dash level in plain words and watch it get built for you. EditorAI talks to the AI of your choice, then places the result in the editor on its own preview layer you can accept, edit, or deny — your level, your call, always.
 
-## Quick Start
-1. Download the [latest release](https://github.com/entity12208/editorai/releases/latest)
-2. Open the game and navigate to the Geode page
-3. Press the manual download button and select the file
-4. Open the editor and press the **AI** button
-5. Click the **gear icon** to configure your AI provider
+*Consider supporting the project by starring it on [GitHub](https://github.com/entity12208/editorai).*
 
-## AI Setup
+## Install
 
-All settings are configured in-game via the **gear icon** in the AI popup.
+1. Download the [latest release](https://github.com/entity12208/editorai/releases/latest) (`.geode` file)
+2. In GD, open the **Geode** page → press the **manual install** button → pick the file
+3. Restart the game
 
-### EditorAI Platinum *(Free - thanks to [VLTGG](https://vltgg.net) for the servers!)*
-[EditorAI Platinum](https://github.com/entity12208/editorai-platinum) is a community proxy that lets anyone run the official EditorAI Ollama models over the internet for free (subject to availability).
+> EditorAI is distributed here rather than on the Geode index, whose guidelines don't allow AI-placed objects.
 
-1. Open settings → set **Provider** to `ollama`
-2. Switch to the **Provider** tab and enable **Platinum**. If it says any http error, Platinum is offline.
-3. Available models are auto-detected from the Platinum network
+## Open the panel
 
-Want to donate your computer to the network? Follow the instructions in the [Platinum repository](https://github.com/entity12208/editorai-platinum).
+Press **E** anywhere in the game (desktop), or tap the floating **AI** bubble (mobile). Everything lives in that panel: starting generations, watching them run, chatting with the AI, and every setting.
 
-### Ollama *(Free — recommended for 6+ GB VRAM)*
-*Uses ~5.2 GB storage. Fully local and private — no internet required after setup.*
+## Pick an AI
 
-1. Download and install [Ollama](https://ollama.com)
-2. Pull any model
-3. Open settings → set **Provider** to `ollama`
-4. Select the model you want
+Open the panel → **Settings** → choose a provider. Two are free with zero accounts:
 
-### Claude *(Paid)*
-1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
-2. Open settings → set **Provider** to `claude` → switch to **Provider** tab
-3. Select a model and paste your API key
+- **Platinum** *(free, community-run — servers by [VLT GG](https://vltgg.net))* — set provider to `ollama`, enable **Use Platinum**. Your prompts run on volunteer machines, so keep personal info out of them. Want to donate compute? See the [Platinum repository](https://github.com/entity12208/editorai-platinum).
+- **Ollama** *(free, fully local — recommended with 6+ GB VRAM)* — install [Ollama](https://ollama.com), pull a model, set provider to `ollama`, pick the model. Nothing leaves your machine.
 
-### Mistral AI *(Paid)*
-1. Get an API key at [console.mistral.ai](https://console.mistral.ai/api-keys/)
-2. Open settings → set **Provider** to `ministral` → switch to **Provider** tab
-3. Select a model and paste your API key
+For hosted providers, pick one and either press **Sign in with browser** (OpenRouter, HuggingFace — no key-copying needed) or paste an API key:
 
-### HuggingFace *(Free tier available)*
-1. Get a write token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 
-2. Open settings → set **Provider** to `huggingface` → switch to **Provider** tab
-3. Enter a model ID and paste your token 
+| Provider | Get a key |
+|---|---|
+| OpenRouter | sign-in button, or [openrouter.ai/keys](https://openrouter.ai/keys) |
+| HuggingFace | sign-in button, or [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
+| Claude | [console.anthropic.com](https://console.anthropic.com) |
+| OpenAI | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
+| Mistral | [console.mistral.ai](https://console.mistral.ai/api-keys/) |
+| DeepSeek | [platform.deepseek.com](https://platform.deepseek.com) |
+| Gemini | [aistudio.google.com](https://aistudio.google.com/api-keys) *(tight rate limits)* |
 
-### ChatGPT *(Paid)*
-1. Get an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
-2. Open settings → set **Provider** to `openai` → switch to **Provider** tab
-3. Select a model and paste your API key
+LM Studio, llama.cpp, and any OpenAI-compatible endpoint work too — point the URL at your server.
 
-### Gemini *(Not recommended — tight rate limits)*
-1. Get an API key at [aistudio.google.com/api-keys](https://aistudio.google.com/u/0/api-keys)
-2. Open settings → set **Provider** to `gemini` → switch to **Provider** tab
-3. Select a model and paste your API key
+## Use it
 
-## Usage
-1. Open the editor of any level
-2. Press the **AI** button in the editor toolbar
-3. Type a description of what you want (e.g. "medium difficulty platforming level")
-4. Click **Generate** and wait — a timer shows elapsed time
-5. AI-generated objects appear as **blue ghost previews**
-6. Choose **Accept**, **Edit**, or **Deny**:
-   - **Accept** — makes objects permanent
-   - **Edit** — makes objects solid so you can move/delete them, then press **Done**
-   - **Deny** — removes all generated objects
-7. Optionally rate the generation 1-10 to help the AI learn
+1. Panel → **Generate**
+2. Pick a target: the current editor, a brand-new level, or any of your created levels
+3. Describe what you want, set difficulty/style/length (or type your own), press **Generate**
+4. Watch it think and work live in **Sessions** — you can close the panel, or even the editor, while it runs
+5. The result appears on its own editor layer (the rest of the level fades back): **Accept**, **Edit**, or **Deny**
+6. Keep talking to it in Sessions to refine, plan, or just ask questions
+7. Rate generations when asked — your ratings teach the AI your taste over time
 
-Use the **up/down arrows** next to the text input to recall previous prompts. Press **Cancel** during generation to abort.
+Every option in the panel has a hover tooltip explaining what it does.
 
-## Settings
+## Fine-tune your own model
 
-Click the **gear icon** in the top-left of the AI popup to access all settings, organized into three tabs:
-
-| Tab | Settings |
-|-----|----------|
-| **General** | Provider, difficulty, style, length, max objects, spawn speed |
-| **Provider** | Model selection, API keys, Ollama/Platinum config, timeout |
-| **Advanced** | Triggers & colors, rate limiting, feedback & learning |
-
-## Advanced Features
-Enable **Triggers/Colors** in the Advanced settings tab to unlock:
-- **Color Triggers** — smooth color transitions for background, ground, and objects
-- **Move Triggers** — moving platforms and obstacles with easing curves
-- **Rotate Triggers** — spinning decorations and obstacles around center points
-- **Alpha Triggers** — fade objects in and out
-- **Toggle Triggers** — show/hide groups of objects
-- **Pulse Triggers** — flash colors on groups for visual emphasis
-- **Spawn & Stop Triggers** — chain trigger sequences and cancel animations
-- **Speed Portals** — control game speed (0.5x to 4x)
-- **Player Visibility** — show/hide the player icon and trail
-- **Color Channels** — assign objects to color channels for coordinated color changes
-- **Group IDs** — assign objects to groups for trigger targeting
-- **Multi-Activate** — make orbs, pads, and triggers fire on every touch
-
-These features work best with smarter models (Claude, Gemini, Ollama qwen, or Platinum).
-
-## Feedback & Learning
-When enabled (on by default), a rating popup appears after you accept/edit/deny a generation. Your ratings and optional text feedback are stored locally and injected into future AI prompts as examples — the AI learns what you like and avoids what you don't. 
-
-## Fine-Tune Your Own Model
-Feel free to join our [Huggingface org](https://huggingface.co/EditorAI-Geode/) to publish your models trained on a EditorAI dataset.
+Join the [HuggingFace org](https://huggingface.co/EditorAI-Geode/) to publish models trained on EditorAI datasets.
 
 ## Support
-Join the [Editor AI Discord server](https://discord.gg/5hwCqMUYNj) for support and ideas.
+
+Found a bug or have an idea? [Open an issue](https://github.com/entity12208/editorai/issues).
