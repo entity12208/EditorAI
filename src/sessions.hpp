@@ -154,6 +154,16 @@ bool editoraiStartGeneration(int target, const std::string& prompt,
                              bool replaceContents, std::string& err,
                              const std::string& expectedName = "");
 
+// Manual provider (copy-paste with any chatbot): editoraiManualCopy builds the
+// full prompt for the CURRENT editor and copies it to the clipboard; the user
+// pastes it into any AI, copies the reply, then editoraiManualBuild reads the
+// clipboard and stages it. editoraiManualPending gates the overlay's Build
+// button. No network, no key. (Defined in main.cpp.)
+bool editoraiManualCopy(const std::string& prompt, bool replaceContents,
+                        std::string& err);
+bool editoraiManualPending();
+bool editoraiManualBuild(std::string& err);
+
 // Inline rating from the overlay (replaces the old RatingPopup flow).
 void editoraiRateSession(const std::shared_ptr<GenSession>& session, int rating);
 

@@ -493,6 +493,8 @@ void providerModelWidget(const std::string& p) {
         settingText("model", "lm-studio-model", "default", false, tip, true);
     else if (p == "llama-cpp")
         settingText("model", "llama-cpp-model", "default", false, tip, true);
+    else if (p == "manual")
+        ImGui::TextColored(COL_DIM, "No model - you paste into any AI yourself.");
     else
         settingText("model", "custom-provider-model", "model name", false, tip, true);
 }
@@ -960,7 +962,10 @@ void composerBody(float dt) {
         ImVec4(COL_ACCENT.x * 0.55f, COL_ACCENT.y * 0.55f, COL_ACCENT.z * 0.55f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
         ImVec4(COL_ACCENT.x * 0.75f, COL_ACCENT.y * 0.75f, COL_ACCENT.z * 0.75f, 1.f));
-    if (ImGui::Button("Generate", ImVec2(140, 32))) {
+    // Manual provider: "Generate" becomes "Copy prompt for AI" (no network).
+    bool manualProv = editoraiGetStr("ai-provider") == "manual";
+    const char* genLabel = manualProv ? "Copy prompt for AI" : "Generate";
+    if (ImGui::Button(genLabel, ImVec2(manualProv ? 180 : 140, 32))) {
         std::string err;
         bool replace = g_st.genTarget == -2 ? true : g_st.genReplace;
         std::string expectName = g_st.genTarget >= 0 &&
@@ -975,31 +980,51 @@ void composerBody(float dt) {
             editoraiGetStr("style") == "levelID" &&
             prompt.find("style:") == std::string::npos)
             prompt += fmt::format("\nstyle: {}", g_st.styleLevelId);
-        // Snapshot the newest session id BEFORE starting: the "Current
-        // editor" target creates its session SYNCHRONOUSLY inside
-        // editoraiStartGeneration, so computing this afterward would equal
-        // the new session's id and the "id > pendingSelectAfter" jump would
-        // never match — leaving the chat pane stuck on the placeholder.
-        int maxIdBefore = 0;
-        for (auto& s : genSessions()) if (s) maxIdBefore = std::max(maxIdBefore, s->id);
-        if (editoraiStartGeneration(g_st.genTarget, prompt, replace,
-                                    err, expectName)) {
-            g_st.genError.clear();
-            memset(g_st.genPrompt, 0, sizeof(g_st.genPrompt));
-            editoraiSetSavedStr("ov-gen-prompt", "");
-            // Select whatever session appears after the pre-call newest id —
-            // works for both the synchronous current-editor path (already in
-            // the list) and deferred targets (created when the editor opens).
-            g_st.pendingSelectAfter = maxIdBefore;
-            g_st.selectedSessionId  = -1;
-            g_st.levelsFresh = false;          // a level was created/changed
-            g_st.composing = false;            // jump to the live conversation
+        if (manualProv) {
+            // Copy the full prompt to the clipboard for the current editor; a
+            // "Build from clipboard" button appears below once it's pending.
+            if (editoraiManualCopy(prompt, replace, err)) g_st.genError.clear();
+            else { g_st.genError = err; g_st.genErrorTtl = 6.f; }
         } else {
-            g_st.genError = err;
-            g_st.genErrorTtl = 6.f;
+            // Snapshot the newest session id BEFORE starting: the "Current
+            // editor" target creates its session SYNCHRONOUSLY inside
+            // editoraiStartGeneration, so computing this afterward would equal
+            // the new session's id and the "id > pendingSelectAfter" jump would
+            // never match — leaving the chat pane stuck on the placeholder.
+            int maxIdBefore = 0;
+            for (auto& s : genSessions()) if (s) maxIdBefore = std::max(maxIdBefore, s->id);
+            if (editoraiStartGeneration(g_st.genTarget, prompt, replace,
+                                        err, expectName)) {
+                g_st.genError.clear();
+                memset(g_st.genPrompt, 0, sizeof(g_st.genPrompt));
+                editoraiSetSavedStr("ov-gen-prompt", "");
+                // Select whatever session appears after the pre-call newest id —
+                // works for both the synchronous current-editor path (already in
+                // the list) and deferred targets (created when the editor opens).
+                g_st.pendingSelectAfter = maxIdBefore;
+                g_st.selectedSessionId  = -1;
+                g_st.levelsFresh = false;          // a level was created/changed
+                g_st.composing = false;            // jump to the live conversation
+            } else {
+                g_st.genError = err;
+                g_st.genErrorTtl = 6.f;
+            }
         }
     }
     ImGui::PopStyleColor(2);
+    // Manual: once a prompt is copied, offer Build-from-clipboard.
+    if (manualProv && editoraiManualPending()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Build from clipboard", ImVec2(180, 32))) {
+            std::string err;
+            if (editoraiManualBuild(err)) {
+                g_st.pendingSelectAfter = 0;
+                g_st.selectedSessionId  = -1;
+                g_st.composing = false;            // jump to the conversation / preview
+            } else { g_st.genError = err; g_st.genErrorTtl = 6.f; }
+        }
+        tipIfHovered("Reads your AI's reply from the clipboard and builds the level.");
+    }
     ImGui::EndDisabled();
     tipIfHovered("Start the generation. You can close this panel - or even "
                  "the editor - while it runs.");
@@ -1028,7 +1053,7 @@ void composerBody(float dt) {
 void tabSettings() {
     static const std::vector<const char*> PROVIDERS = {
         "gemini", "claude", "openai", "openrouter", "ministral",
-        "huggingface", "deepseek", "ollama", "lm-studio", "llama-cpp", "custom"};
+        "huggingface", "deepseek", "ollama", "lm-studio", "llama-cpp", "custom", "manual"};
     static const std::vector<const char*> SUB_PROVIDERS = {
         "", "gemini", "claude", "openai", "openrouter", "ministral",
         "huggingface", "deepseek", "ollama", "lm-studio", "llama-cpp"};
@@ -1067,6 +1092,9 @@ void tabSettings() {
             settingText("auth header", "custom-provider-auth",
                 "Authorization: Bearer ${KEY}", false,
                 "How the key is attached. ${KEY} is replaced with it.");
+        } else if (p == "manual") {
+            ImGui::TextColored(COL_DIM, "No key, no account. Generate copies a prompt;");
+            ImGui::TextColored(COL_DIM, "paste into any AI, copy the reply, press Build.");
         } else {
             settingText("API key", p + "-api-key", "paste key", true,
                 "Stored locally on this device and only sent to the "

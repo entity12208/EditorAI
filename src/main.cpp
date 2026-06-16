@@ -3143,8 +3143,26 @@ inline Line tokenize(const std::string& raw) {
         }
         std::string tok = s.substr(start, i - start);
         if (eq == std::string::npos) {
-            // Bare positional
-            out.pos.push_back(tok);
+            // Bare token: either a positional (variant/x/y) OR a known flag
+            // word. The system prompt teaches bare flags (`SPIKE 600 notouch`,
+            // `BLOCK 900 105 passable`, `COLOR ... blend`, `TRIGGER ... multi_activate`),
+            // but flag()/applyCommonFields/triggerObj only read kv — so a bare
+            // flag would otherwise fall into `pos`, where positional consumers
+            // silently eat it (and the flag never applies). Promote a recognized
+            // flag word into kv as "true"; non-flag bare tokens (variants like
+            // `small`/`ship`/`yellow`) stay positional as before.
+            static const std::unordered_set<std::string> kBareFlags = {
+                "passable", "notouch", "no_touch", "hide", "noglow", "no_glow",
+                "nofade", "dont_fade", "dontenter", "dont_enter", "highdetail",
+                "high_detail", "noeffects", "no_effects", "blend", "blending",
+                "multi_activate", "multi", "touch", "spawn_triggered",
+                "flip_x", "flip_y", "player_color", "exclusive", "lock_rotation",
+                "lock_object_rotation", "lock_to_player_x", "lock_to_player_y",
+                "activate", "hold", "editor_disable", "exit",
+            };
+            std::string lo = lower(tok);
+            if (kBareFlags.count(lo)) out.kv[lo] = "true";
+            else                      out.pos.push_back(tok);
         } else {
             size_t rel = eq - start;
             std::string k = lower(tok.substr(0, rel));
@@ -6865,6 +6883,7 @@ protected:
     int         m_pkcePort = 0;
     float       m_pkceElapsed = 0.f;  // seconds since the browser was opened
     async::TaskHolder<web::WebResponse> m_authNet;
+    async::TaskHolder<web::WebResponse> m_modelNet;   // dynamic model-list fetch
     CCLabelBMFont* m_authStatus = nullptr;
     CCSprite*      m_authDot    = nullptr;  // status pill dot, tinted with each setAuthStatus
 
@@ -7280,7 +7299,6 @@ protected:
     // care of the overflow (this is the only tab that scrolls).
     void buildAdvanced() {
         addHeader("Prompting");
-        addToggle("Compact prompts",   "compact-prompts");
         addToggle("Enable AI tools",   "enable-ai-tools");
         addToggle("Triggers & colors", "enable-advanced-features");
         addInt   ("Refinement rounds", "refinement-rounds", 0, 10, 3);
@@ -7355,7 +7373,6 @@ protected:
         auto o = matjson::Value::object();
         o["provider"] = provider;
         o["model"]    = Mod::get()->getSettingValue<std::string>(providerModelSettingKey(provider));
-        o["compact"]  = Mod::get()->getSettingValue<bool>("compact-prompts");
         o["tools"]    = Mod::get()->getSettingValue<bool>("enable-ai-tools");
         o["refine"]   = (int)Mod::get()->getSettingValue<int64_t>("refinement-rounds");
         Mod::get()->setSavedValue<std::string>(
@@ -7388,8 +7405,6 @@ protected:
                 Mod::get()->setSettingValue<std::string>(
                     providerModelSettingKey(prov.unwrap()), model.unwrap());
         }
-        auto compact = p["compact"].asBool();
-        if (compact) Mod::get()->setSettingValue<bool>("compact-prompts", compact.unwrap());
         auto tools = p["tools"].asBool();
         if (tools) Mod::get()->setSettingValue<bool>("enable-ai-tools", tools.unwrap());
         auto refine = p["refine"].asInt();
@@ -7409,11 +7424,12 @@ protected:
         bool isOAuth  = (p == "huggingface");
         bool isLocal  = (p == "ollama" || p == "lm-studio"  || p == "llama-cpp");
         bool isCustom = (p == "custom");
+        bool isManual = (p == "manual");
 
         addHeader("Provider");
         addCycler("Provider", "ai-provider",
             {"gemini","claude","openai","openrouter","ministral","huggingface",
-             "deepseek","ollama","lm-studio","llama-cpp","custom"});
+             "deepseek","ollama","lm-studio","llama-cpp","custom","manual"});
 
         addHeader("Model");
         if (p == "gemini")
@@ -7449,10 +7465,40 @@ protected:
             addText("URL",   "custom-provider-url",  "https://...",  150);
             addText("Model", "custom-provider-model","model name",   100);
             addText("Auth",  "custom-provider-auth", "Authorization: Bearer ${KEY}", 150);
+        } else if (isManual) {
+            addNote("Manual / copy-paste — no key or model. Generate copies a");
+            addNote("prompt; paste it into any AI, then paste the reply back.");
+        }
+
+        // ── Dynamic model picker (skipped for the manual copy-paste provider) ─
+        // Fetch the provider's real model list (no hardcoded options) and show
+        // each as a tappable row that writes the per-provider model setting.
+        if (!isManual) {
+            auto row = makeBareRow(30.f);
+            auto menu = CCMenu::create();
+            menu->setContentSize({ROW_W, 30.f});
+            menu->ignoreAnchorPointForPosition(false);
+            menu->setAnchorPoint({0.5f, 0.5f});
+            menu->setPosition({ROW_W / 2.f, 15.f});
+            auto spr = ButtonSprite::create("Fetch model list", "bigFont.fnt",
+                                            "GJ_button_04.png", 0.5f);
+            spr->setScale(0.62f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this,
+                           menu_selector(AISettingsPopup::onFetchModels));
+            btn->setPosition({ROW_W / 2.f, 15.f});
+            menu->addChild(btn);
+            row->addChild(menu);
+            pushRow(row);
+        }
+        if (auto it = modelCache().find(p); it != modelCache().end() && !it->second.empty()) {
+            std::string curModel =
+                geode::Mod::get()->getSettingValue<std::string>(providerModelSettingKey(p));
+            addNote(fmt::format("{} models - tap to select:", it->second.size()));
+            for (const auto& m : it->second) addPickRow(m, m == curModel);
         }
 
         addHeader("Authentication");
-        if (!isLocal) {
+        if (!isLocal && !isManual) {
             std::string keySid = isCustom ? std::string("custom-provider-api-key")
                                           : (p + "-api-key");
             bool hasOAuth = !oauth::savedToken(p).empty();
@@ -7501,13 +7547,13 @@ protected:
             if (isOAuth)
                 mkBtn("Sign In", menu_selector(AISettingsPopup::onSignIn),
                       "GJ_button_01.png", "goldFont.fnt", 0.5f);
-            if (!isLocal && !isCustom)
+            if (!isLocal && !isCustom && !isManual)
                 mkBtn("Key page", menu_selector(AISettingsPopup::onOpenKeyPage),
                       "GJ_button_04.png", "bigFont.fnt", 0.4f);
             if (isLocal)
                 mkBtn("Test connection", menu_selector(AISettingsPopup::onTestKey),
                       "GJ_button_01.png", "goldFont.fnt", 0.5f);
-            if (!isLocal)
+            if (!isLocal && !isManual)
                 mkBtn("Save & test", menu_selector(AISettingsPopup::onSaveAndTest),
                       "GJ_button_02.png", "goldFont.fnt", 0.5f);
             if (!oauth::savedToken(p).empty())
@@ -7519,10 +7565,11 @@ protected:
         }
 
         bool hasOAuth  = !oauth::savedToken(p).empty();
-        bool hasManual = !isLocal && !isCustom &&
+        bool hasManual = !isLocal && !isCustom && !isManual &&
             !geode::Mod::get()->getSettingValue<std::string>(p + "-api-key").empty();
         if      (hasOAuth)  setAuthStatus("✓ Signed in via OAuth.",          ui::SUCCESS_COL);
         else if (hasManual) setAuthStatus("Manual API key set.",             ui::TEXT_SECONDARY);
+        else if (isManual)  setAuthStatus("No key needed — copy-paste flow.",ui::TEXT_SECONDARY);
         else if (isLocal)   setAuthStatus("No auth needed — Test to verify.",ui::TEXT_SECONDARY);
         else                setAuthStatus("Not configured.",                 ui::ERROR_COL);
     }
@@ -7602,6 +7649,139 @@ protected:
                 else setAuthStatus(fmt::format("✗ HTTP {}.", resp.code()),
                                    ui::ERROR_COL);
             });
+    }
+
+    // ── Dynamic model list ────────────────────────────────────────────────
+    // Fetches the provider's REAL available models from its own API instead of
+    // a hardcoded list: /api/tags for Ollama/Platinum, /v1/models for every
+    // OpenAI-compatible provider + Claude, /v1beta/models for Gemini, and the
+    // trending text-generation list for HuggingFace. Results are cached for the
+    // session; the Provider tab renders each as a tappable row.
+    static std::unordered_map<std::string, std::vector<std::string>>& modelCache() {
+        static std::unordered_map<std::string, std::vector<std::string>> c;
+        return c;
+    }
+
+    static std::string modelListUrl(const std::string& provider) {
+        if (provider == "ollama")     return getOllamaUrl() + "/api/tags";
+        if (provider == "lm-studio")  return geode::Mod::get()->getSettingValue<std::string>("lm-studio-url") + "/v1/models";
+        if (provider == "llama-cpp")  return geode::Mod::get()->getSettingValue<std::string>("llama-cpp-url") + "/v1/models";
+        if (provider == "openai")     return "https://api.openai.com/v1/models";
+        if (provider == "claude")     return "https://api.anthropic.com/v1/models";
+        if (provider == "ministral")  return "https://api.mistral.ai/v1/models";
+        if (provider == "deepseek")   return "https://api.deepseek.com/v1/models";
+        if (provider == "openrouter") return "https://openrouter.ai/api/v1/models";
+        if (provider == "gemini")     return "https://generativelanguage.googleapis.com/v1beta/models";
+        if (provider == "huggingface")
+            return "https://huggingface.co/api/models?pipeline_tag=text-generation&sort=trending&limit=60";
+        if (provider == "custom") {
+            std::string base = geode::Mod::get()->getSettingValue<std::string>("custom-provider-url");
+            if (base.empty()) return "";
+            auto pos = base.find("/chat/completions");
+            if (pos != std::string::npos) base = base.substr(0, pos);
+            while (!base.empty() && base.back() == '/') base.pop_back();
+            auto endsWith = [&](const char* s){ std::string t = s; return base.size() >= t.size() && base.compare(base.size() - t.size(), t.size(), t) == 0; };
+            if (endsWith("/v1/models")) return base;
+            if (endsWith("/v1"))        return base + "/models";
+            return base + "/v1/models";
+        }
+        return "";
+    }
+
+    // Normalize a model-list response into a deduped, sorted, capped id list.
+    // Passed by value so internal access is non-const (matjson operator[]).
+    static std::vector<std::string> parseModelList(matjson::Value json) {
+        std::vector<std::string> out;
+        std::unordered_set<std::string> seen;
+        auto add = [&](std::string id) {
+            if (id.empty()) return;
+            if (id.rfind("models/", 0) == 0) id = id.substr(7);  // gemini: "models/gemini-…"
+            if (seen.insert(id).second) out.push_back(std::move(id));
+        };
+        auto scanArray = [&](matjson::Value& arr, const char* field) {
+            for (size_t i = 0; i < arr.size(); ++i) {
+                // const ref → const operator[] returns null on a missing key
+                // instead of INSERTING into the parsed response (house rule).
+                const matjson::Value& e = arr[i];
+                if (e.isString()) { add(e.asString().unwrapOr("")); continue; }
+                if (!e.isObject()) continue;
+                if (auto r = e[field].asString()) add(r.unwrap());
+            }
+        };
+        if (json.contains("data") && json["data"].isArray())          // OpenAI-compat + Claude + OpenRouter
+            scanArray(json["data"], "id");
+        else if (json.contains("models") && json["models"].isArray()) // Ollama (name) + Gemini (name)
+            scanArray(json["models"], "name");
+        else if (json.isArray())                                      // HuggingFace trending
+            scanArray(json, "id");
+        std::sort(out.begin(), out.end());
+        if (out.size() > 80) out.resize(80);  // keep the picker scrollable, not endless
+        return out;
+    }
+
+    void onFetchModels(CCObject*) {
+        flushInputs();   // persist typed key/url/model before any rebuild
+        std::string provider = geode::Mod::get()->getSettingValue<std::string>("ai-provider");
+        std::string url = modelListUrl(provider);
+        if (url.empty()) {
+            setAuthStatus("Set the endpoint URL first.", ui::ERROR_COL); return;
+        }
+        std::string key = getProviderApiKey(provider);
+        setAuthStatus("Fetching models…", ui::BUSY_COL);
+        auto req = web::WebRequest();
+        req.timeout(std::chrono::seconds(15));
+        applyProviderAuth(req, provider, key);
+        m_modelNet.spawn(req.get(url),
+            [this, provider](web::WebResponse resp) {
+                if (!resp.ok()) {
+                    setAuthStatus(fmt::format("✗ Models HTTP {}.", resp.code()), ui::ERROR_COL);
+                    return;
+                }
+                auto jr = resp.json();
+                if (!jr) { setAuthStatus("✗ Bad model-list JSON.", ui::ERROR_COL); return; }
+                auto list = parseModelList(std::move(jr).unwrap());
+                if (list.empty()) { setAuthStatus("No models returned.", ui::ERROR_COL); return; }
+                size_t n = list.size();
+                modelCache()[provider] = std::move(list);
+                buildTab();   // re-render the Provider tab with the selectable rows
+                setAuthStatus(fmt::format("✓ {} models — tap one to use it.", n), ui::SUCCESS_COL);
+            });
+    }
+
+    void onPickModel(CCObject* sender) {
+        auto* node = static_cast<CCNode*>(sender);
+        auto* str  = static_cast<CCString*>(node->getUserObject());
+        if (!str) return;
+        std::string model = str->getCString();
+        flushInputs();   // save other fields first…
+        std::string provider = geode::Mod::get()->getSettingValue<std::string>("ai-provider");
+        geode::Mod::get()->setSettingValue<std::string>(
+            providerModelSettingKey(provider), model);   // …then override the model
+        buildTab();
+        setAuthStatus(fmt::format("Model set: {}", model), ui::SUCCESS_COL);
+    }
+
+    // One tappable model row — full name in the userObject, a bullet on the
+    // currently-selected one, display truncated so long ids don't overflow.
+    void addPickRow(const std::string& model, bool current) {
+        auto row = makeRow("");
+        auto menu = CCMenu::create();
+        menu->setContentSize({ROW_W, ROW_H});
+        menu->ignoreAnchorPointForPosition(false);
+        menu->setAnchorPoint({0.5f, 0.5f});
+        menu->setPosition({ROW_W / 2.f, ROW_H / 2.f});
+        std::string shown = model.size() > 34 ? model.substr(0, 33) + "…" : model;
+        if (current) shown = "● " + shown;
+        auto spr = ButtonSprite::create(shown.c_str(), "bigFont.fnt",
+                       current ? "GJ_button_02.png" : "GJ_button_05.png", 0.5f);
+        spr->setScale(0.6f);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this,
+                       menu_selector(AISettingsPopup::onPickModel));
+        btn->setUserObject(CCString::create(model));
+        btn->setPosition({ROW_W / 2.f, ROW_H / 2.f});
+        menu->addChild(btn);
+        row->addChild(menu);
+        pushRow(row);
     }
 
     void onSignIn(CCObject*) {
@@ -8808,6 +8988,7 @@ protected:
     CCLabelBMFont*           m_statusLabel    = nullptr;
     CCMenuItemSpriteExtra*   m_generateBtn    = nullptr;
     CCMenuItemSpriteExtra*   m_cancelBtn      = nullptr;
+    std::string              m_manualPromptBlob;   // manual provider: last prompt copied to clipboard
     CCMenuItemToggler*       m_editModeToggle = nullptr;
 
     // ── Tool-use plumbing (AI-only — not user-facing) ────────────────────
@@ -11369,7 +11550,6 @@ protected:
 
     std::string buildSystemPrompt() {
         bool advFeatures   = Mod::get()->getSettingValue<bool>("enable-advanced-features");
-        bool compactPrompt = Mod::get()->getSettingValue<bool>("compact-prompts");
 
         // ── Mode preface (Creation vs Edit) ───────────────────────────────
         // The whole rest of the prompt assumes a from-scratch level. When the
@@ -11404,28 +11584,24 @@ protected:
                 "the requested length/difficulty. Use macros liberally.\n\n";
         }
 
-        // Cache the configured ground Y. Used by both the full and compact
-        // prompts. {1}=ground, {2}=ground+30, {3}=ground+60, {4}=ground+90.
+        // Cache the configured ground Y for the prompt.
+        // {1}=ground, {2}=ground+30, {3}=ground+60, {4}=ground+90.
         const int gY  = (int)getGroundY();
         const int gY1 = gY + 30;
         const int gY2 = gY + 60;
         const int gY3 = gY + 90;
 
-        // Build the object catalog. The expanded 3,986-entry object_ids.json
-        // dumped wholesale would be ~120 KB / ~28K tokens — fine on 128K-context
-        // frontier models, fatal on the 8K-context small ones we ship to. Two
-        // tiers:
+        // Build the object catalog. Dumping the full 3,986-entry object_ids.json
+        // would be ~120 KB / ~28K tokens — fine on 128K-context frontier models,
+        // fatal on the 8K-context small ones we ship to, and a cost multiplier
+        // everywhere. So we ALWAYS send a single curated allowlist (~140 entries,
+        // ~3 KB / ~800 tokens) covering every gameplay-essential shape plus core
+        // decoration; the AI reaches the long tail via the search_objects tool
+        // or `OBJ <name>`.
         //
-        //   compact-prompts = true   →  curated ~90-entry allowlist below
-        //                                (covers every gameplay-essential
-        //                                shape; ~3 KB / ~750 tokens, fits 8K)
-        //
-        //   compact-prompts = false  →  full catalog dump
-        //                                (~28 K tokens; targets ≥64K context)
-        //
-        // The allowlist is hand-picked against the actual catalog so every
-        // entry resolves. If you add new names to object_ids.json, you can
-        // safely append them here without touching the prompt logic.
+        // The allowlist is hand-picked against the actual catalog so every entry
+        // resolves. If you add new names to object_ids.json, you can safely
+        // append them here without touching the prompt logic.
         static const std::vector<std::string> COMPACT_OBJECT_ALLOWLIST = {
             // ── Blocks (gameplay foundation) ───────────────────────────────
             "block_black_gradient_square",
@@ -11562,148 +11738,57 @@ protected:
             "effect_pulsing_star",
             "effect_pulsing_music_note",
             // ── Teleport ─────────────────────────────────────────────────────
-            "portal_linked_teleport_portals"
+            "portal_linked_teleport_portals",
+            // ── Extra decoration (depth & detail without the full catalog;
+            //    any name missing from object_ids.json is silently skipped) ────
+            "decor_tall_rod", "decor_medium_rod", "decor_short_rod",
+            "decor_tall_chain",
+            "spike_large_decorative_spikes", "spike_medium_decorative_spikes",
+            "spike_small_decorative_spikes",
+            "effect_pulsing_filled_circle", "effect_pulsing_diamond",
+            "effect_large_pulsing_arrow_1", "effect_large_pulsing_arrow_2",
+            "obj_cartoon_arrow", "obj_tiny_arrow",
+            "large_cloud", "small_cloud", "medium_cloud", "large_round_cloud",
+            "large_fading_cloud", "small_fading_cloud"
         };
-        std::string objectList;
-        size_t catalogIncluded = 0;
-        if (compactPrompt) {
-            // Filter the allowlist against what we actually have IDs for.
-            // Anything missing from OBJECT_IDS is silently skipped (defensive
-            // — every entry above was verified, but the file could drift).
-            // Deterministic after startup, so built exactly once (the full
-            // catalog below already had this treatment).
-            static const std::pair<std::string, size_t> s_compactCatalog = [] {
-                std::string list;
-                size_t included = 0;
-                list.reserve(COMPACT_OBJECT_ALLOWLIST.size() * 32);
-                bool first = true;
-                for (const auto& name : COMPACT_OBJECT_ALLOWLIST) {
-                    if (OBJECT_IDS.find(name) == OBJECT_IDS.end()) continue;
-                    if (!first) list += ", ";
-                    list += name;
-                    first = false;
-                    ++included;
-                }
-                return std::make_pair(std::move(list), included);
-            }();
-            objectList = s_compactCatalog.first;
-            catalogIncluded = s_compactCatalog.second;
-        } else {
-            // Full mode: ONE name per object ID — the shortest (aliases used
-            // to appear alongside their canonical names, double-listing IDs).
-            // Sorted for reproducibility (helps provider prompt caches);
-            // immutable after startup, so built exactly once.
-            static const std::string s_fullCatalog = [] {
-                const auto& idToName = objectIdToName();
-                std::vector<const std::string*> sorted;
-                sorted.reserve(idToName.size());
-                for (auto& [id, name] : idToName) {
-                    // prepareObjects silently drops particle_ objects (they
-                    // need per-particle setup the pipeline can't do) — don't
-                    // advertise names the AI can never place.
-                    if (name.rfind("particle_", 0) == 0) continue;
-                    sorted.push_back(&name);
-                }
-                std::sort(sorted.begin(), sorted.end(),
-                    [](const std::string* a, const std::string* b){ return *a < *b; });
-                std::string list;
-                list.reserve(sorted.size() * 22);
-                bool first = true;
-                for (auto* p : sorted) {
-                    if (!first) list += ", ";
-                    list += *p;
-                    first = false;
-                }
-                return list;
-            }();
-            objectList = s_fullCatalog;
-            catalogIncluded = objectIdToName().size();
-            log::info("Full prompt: catalog dumped, {} unique objects (~{} chars)",
-                catalogIncluded, objectList.size());
-        }
+        // Curated essentials catalog — ALWAYS. The full 3,986-entry dump was
+        // ~120 KB / ~28K tokens: fatal on small-context local models and a
+        // needless cost multiplier on hosted APIs. This list covers every
+        // gameplay-essential shape plus core decoration; the AI reaches the
+        // long tail via the search_objects tool or `OBJ <name>`. Built once
+        // (deterministic after startup); names missing from OBJECT_IDS are
+        // silently skipped (defensive against object_ids.json drift).
+        static const std::pair<std::string, size_t> s_catalog = [] {
+            std::string list;
+            size_t included = 0;
+            list.reserve(COMPACT_OBJECT_ALLOWLIST.size() * 32);
+            bool first = true;
+            for (const auto& name : COMPACT_OBJECT_ALLOWLIST) {
+                if (OBJECT_IDS.find(name) == OBJECT_IDS.end()) continue;
+                if (!first) list += ", ";
+                list += name;
+                first = false;
+                ++included;
+            }
+            return std::make_pair(std::move(list), included);
+        }();
+        const std::string& objectList = s_catalog.first;
+        size_t catalogIncluded = s_catalog.second;
+        (void)catalogIncluded;
 
-        // ── EAS-teaching prompt (used for both compact and full modes) ─────
-        // EditorAI Script (EAS) is the PREFERRED output format. It's a
-        // line-based DSL that's far more compact than JSON (~6 tokens/obj
-        // vs ~25 for JSON), forces structural thinking via macros, and
-        // bakes metadata into a mandatory first verb.
-        //
-        // Compact mode: short catalog + brief verbs only. Full mode adds
-        // the long catalog + the trigger docs.
-        if (compactPrompt) {
-            // Compact prompt — ~1.4 KB before catalog. Drops every long
-            // explanation; keeps verb grammar + the must-know coordinate rule
-            // + a tiny worked example. Optimised for cost (hosted APIs charge
-            // per token) and small-context models (≤8K).
-            return modePrefix + fmt::format(
-                "GD level designer. Output ONE format end-to-end:\n"
-                " A) EAS (preferred). Markdown plan, then `## Level Script`, then\n"
-                "    EAS lines. Parser keeps everything after `## Level Script`.\n"
-                " B) JSON: {{\"analysis\"?, \"objects\"?:[{{type,x,y,...}}], "
-                "\"macros\"?:[{{name,...}}], \"level_metadata\"?:{{...}}}}.\n"
-                "Analysis/objects are optional — metadata-only updates are valid.\n\n"
-                "GRID: 30 unit cells. Y = object CENTER. Ground={1}; up rows {2}, {3}, {4}. Never Y<{1}.\n\n"
-                "EAS GRAMMAR (one per line; `[opt]`):\n"
-                " META name=\"\" desc=\"\" song_id=N bg=N ground=N [platformer=true]\n"
-                " COLOR ch=N hex=RRGGBB [blend] [at=X duration=T  ← runtime]\n"
-                " SECTION x0..x1 difficulty=easy|medium|hard|insane mode=cube|ship|ball|ufo|wave|robot|spider|swing\n"
-                " FLOOR x0..x1 [y={1}]            CORRIDOR x0..x1 ceiling=Y floor=Y\n"
-                " PLATFORM-RUN x0..x1 y=Y [gap=G gap-every=E]\n"
-                " SPIKE x [variant=basic|tiny|small|half|pit|slope]\n"
-                " BLOCK x y [variant=basic|small|slab|grid]   SAW x y [size=small|medium|large]\n"
-                " SPIKE-TRAIN x count=N [spacing=30]   STAIR-UP|STAIR-DOWN x steps=N\n"
-                " PILLAR x y_bot=Y y_top=Y   BLOCK-STACK x y count=N\n"
-                " PYRAMID x=X [base=5]   CEILING-SPIKES x0..x1 [y=375]\n"
-                " SAW-GAUNTLET x0..x1 [spacing=120 size=small weave=0]\n"
-                " ORB <yellow|pink|red|blue|green|black|dash> x y\n"
-                " PAD <yellow|pink|red|blue|spider> x y\n"
-                " PORTAL <cube|ship|ball|ufo|wave|robot|spider|swing|mini|normal|mirror-on|mirror-off"
-                "|speed-half|speed-normal|speed-double|speed-triple|speed-quad|gravity-up|gravity-down|gravity-reverse|dual> x [y]\n"
-                " ARC-ORBS x y count=N [spacing=60]   COPY from=x0..x1 offset=DX\n"
-                " MIRROR axis=X [from=x0..x1]\n"
-                " ROW <catalog_name> x0..x1 [y={1} step=30]  ← run-length: any object, one line\n"
-                " DUAL x0..x1 [gap=240]   TELEPORT x [y_offset=DY]\n"
-                " TRIGGER color|alpha|move|toggle|pulse|rotate|scale|shake|spawn|stop|end\n"
-                "  |zoom|static-cam|offset-cam|timewarp|song|sfx|follow|follow-y|touch|count|pickup|on-death\n"
-                "  |animate|gravity|teleport|reverse|bg-on|bg-off|no-enter-fx|show-player|hide-player ...\n"
-                " OBJ <catalog_name> x y          ← escape hatch\n"
-                "PER-LINE FIELDS (work on any verb): scale=F rot=N color=N detail=N "
-                "groups=1,2 z_layer=N z_order=N flip_x flip_y multi_activate "
-                "passable notouch hide noglow nofade highdetail dontenter noeffects\n\n"
-                "RULES: section must START with FLOOR or CORRIDOR. Obstacle every "
-                "90-210u (easy 150-210, medium 90-150, hard 60-90, insane 30-60). "
-                "End each gamemode at a portal. Triggers are X-positional.\n"
-                "TOKEN ECONOMY: omit y when it equals ground ({1}). Prefer ROW / "
-                "FLOOR / SPIKE-TRAIN / COPY / MIRROR over repeated OBJ lines — "
-                "one macro line beats twenty object lines.\n"
-                "LENGTH (X span): short 1200-2400, medium 2400-9000, long 9000-18000, xl 18000+. "
-                "Aim 100-500 objects — let macros do the heavy lifting.\n"
-                "OUTPUT BUDGET: keep analysis to 1-2 sentences. No prose between lines. "
-                "Prefer macros over emitting individual blocks. Don't repeat already-known facts.\n\n"
-                "CATALOG (use these names with OBJ / variant=): {0}\n\n"
-                "EXAMPLE:\n"
-                "## Plan\nMedium cube → ship drop, 30s, modern.\n"
-                "## Level Script\n"
-                "META name=\"Drop\" desc=\"30s\" song_id=467339 bg=1 ground=1\n"
-                "COLOR ch=1000 hex=1a2030 blend\n"
-                "SECTION 0..3000 difficulty=medium mode=cube\n"
-                "FLOOR 0..3000\n"
-                "SPIKE-TRAIN 300 count=2   ORB yellow 600 135   STAIR-UP 900 steps=3\n"
-                "SPIKE 1200   ARC-ORBS 1500 165 count=3 spacing=120\n"
-                "SPIKE-TRAIN 2000 count=4 spacing=45   PAD yellow 2500 105\n"
-                "PORTAL ship 2900 165\n"
-                "SECTION 3000..6000 difficulty=hard mode=ship\n"
-                "TRIGGER color ch=1000 hex=2a1030 at=3000 duration=0.4 blend\n"
-                "CORRIDOR 3000..6000 ceiling=270 floor=60\n"
-                "SAW small 3300 180   PORTAL speed-double 3600 0\n"
-                "SAW medium 4200 165   SAW large 4800 195\n"
-                "TRIGGER pulse ch=1001 hex=ff3366 at=5000 duration=0.5\n"
-                "TRIGGER end at=6000",
-                objectList, gY, gY1, gY2, gY3
-            ) + std::string(editorai::GDCS_DESIGN_TIPS);
-        }
+        // ── EAS-teaching prompt — ONE optimized prompt for every model ─────
+        // EditorAI Script (EAS) is the PREFERRED output format: a line-based
+        // DSL far more compact than JSON (~6 tokens/obj vs ~25), that forces
+        // structural thinking via macros and bakes metadata into a mandatory
+        // first verb. There is no longer a compact/full split — this single
+        // prompt carries the COMPLETE grammar + trigger docs, but pairs it with
+        // the CURATED catalog built above (not the 3,986-entry dump), so the
+        // whole system prompt lands around ~3K tokens: dense enough for good
+        // levels, small enough for 8K-context local models, and cheap on hosted
+        // APIs. The long tail of objects is reachable via the search_objects
+        // tool or `OBJ <name>`.
 
-        // Full-mode prompt — kept terse on purpose. Prior revisions exploded
+        // Prompt body — kept terse on purpose. Prior revisions exploded
         // to ~5K tokens of prose; the model already knows GD design after
         // training, so we ship grammar + rules + one worked example, not a
         // textbook. The 3,986-entry catalog dump remains the dominant share.
@@ -11821,7 +11906,9 @@ protected:
             "SAW medium 4200 165   SAW large 4800 195\n"
             "TRIGGER move groups=5 at=5000 dx=-300 dy=0 duration=2.0 easing=1\n"
             "BLOCK 5400 180 groups=5   TRIGGER end at=7000\n\n"
-            "CATALOG (names for OBJ / variant fields):\n {0}",
+            "CATALOG — essentials only (curated core). For ANY object beyond "
+            "this list, call the search_objects tool (when tools are on) or use "
+            "OBJ <name>; the full library is 3,986 objects:\n {0}",
             objectList, gY, gY1, gY2, gY3
         );
 
@@ -11843,23 +11930,22 @@ protected:
             " industrial ch=1000 #2a2a2a / 1001 #3a3a3a / 10  #ff6633\n";
 
         // Few-shot examples — real .gmd slices matched to the requested
-        // style. Compact mode caps at 1 (the catalog already eats budget);
-        // full mode keeps 3 for stylistic variety. Each example is the raw
+        // style. Capped at 1 to keep the prompt small; each example is the raw
         // objects array (X normalized to 0).
         if (!EXAMPLE_SECTIONS.empty()) {
-            int wantPicks = compactPrompt ? 1 : 3;
+            int wantPicks = 1;
             auto picks = pickExampleIndices(s_lastDifficulty, s_lastStyle, wantPicks);
             if (!picks.empty()) {
                 base += "\n\nFEW-SHOT (real GD slices, X normalized to 0 — adapt anywhere):\n";
                 for (size_t k = 0; k < picks.size(); ++k) {
                     const auto& ex = EXAMPLE_SECTIONS[picks[k]];
-                    // Compact mode: cap the example at ~2400 chars, cut at a
-                    // complete object boundary so the model never sees a
-                    // half-written object to imitate. Style transfer works
-                    // off the first dozens of objects; the tail is repetition.
+                    // Cap the example at ~2400 chars, cut at a complete object
+                    // boundary so the model never sees a half-written object to
+                    // imitate. Style transfer works off the first dozens of
+                    // objects; the tail is repetition.
                     std::string_view objs = ex.objectsJson;
                     std::string truncated;
-                    if (compactPrompt && objs.size() > 2400) {
+                    if (objs.size() > 2400) {
                         size_t cut = objs.rfind("},", 2400);
                         if (cut != std::string_view::npos) {
                             truncated.assign(objs.substr(0, cut + 1));
@@ -12702,8 +12788,7 @@ protected:
         if (m_editMode) {
             // Edit runs get the numbered inventory — MOVE/DELETE/EDIT
             // selectors resolve against exactly this listing.
-            bool compact = Mod::get()->getSettingValue<bool>("compact-prompts");
-            std::string inv = buildLevelInventoryListing(compact ? 1000 : 2200);
+            std::string inv = buildLevelInventoryListing(1500);
             log::info("=== Tool-loop: edit inventory context ({} chars) ===", inv.size());
             levelDataSection = "\n\n" + inv;
         } else if (!m_shouldClearLevel) {
@@ -14760,8 +14845,7 @@ protected:
             // Edit runs get the numbered inventory so MOVE/DELETE/EDIT
             // selectors resolve against exactly what the model saw — even
             // on single-shot providers (tools off, Platinum, custom).
-            bool compact = Mod::get()->getSettingValue<bool>("compact-prompts");
-            std::string inv = buildLevelInventoryListing(compact ? 1000 : 2200);
+            std::string inv = buildLevelInventoryListing(1500);
             log::info("=== Single-shot: edit inventory context ({} chars) ===", inv.size());
             levelDataSection = "\n\n" + inv;
         } else if (!m_shouldClearLevel) {
@@ -14978,6 +15062,14 @@ protected:
     // ── Generate button handler ───────────────────────────────────────────────
 
     void startGeneration(std::string prompt, const std::string& apiKey) {
+        // Manual provider has no network: copy the prompt + show the cocos Build
+        // dialog instead of calling an API. Defensive single chokepoint — covers
+        // any path (cocos onGenerate, headless, resumed) that reaches here with
+        // manual selected. (The overlay uses the editoraiManual* bridge directly.)
+        if (Mod::get()->getSettingValue<std::string>("ai-provider") == "manual") {
+            startManualCopy(prompt);
+            return;
+        }
         // Rate limiting — prevent excessive API calls
         static std::chrono::steady_clock::time_point lastRequestTime{};
         if (Mod::get()->getSettingValue<bool>("enable-rate-limiting")) {
@@ -15076,6 +15168,7 @@ protected:
         }
 
         std::string provider = Mod::get()->getSettingValue<std::string>("ai-provider");
+        if (provider == "manual") { startManualCopy(prompt); return; }
         std::string apiKey   = getProviderApiKey(provider);
 
         // Custom provider needs a URL (always) but the API key is optional
@@ -15122,6 +15215,124 @@ protected:
             startGeneration(prompt, apiKey);
         }
     }
+
+    public:
+    // ── Manual provider: copy-paste with any chatbot ────────────────────────
+    // No API, no key, no network. Copy builds the full prompt to the clipboard;
+    // the user pastes it into any AI (ChatGPT/Claude/Gemini/…), copies the
+    // reply, and Build runs the pasted text through the exact same parser +
+    // staging pipeline as a real API response. These are public so the overlay
+    // bridge (editoraiManual*) and the cocos AI-button path can both drive them.
+    std::string buildManualUserBlock(const std::string& prompt) {
+        std::string difficulty = Mod::get()->getSettingValue<std::string>("difficulty");
+        std::string style      = Mod::get()->getSettingValue<std::string>("style");
+        std::string length     = Mod::get()->getSettingValue<std::string>("length");
+        if (style == "levelID") style = "match the reference level";
+        auto lt = lengthTargetForSetting(length);
+        float minX = lt.minSeconds * GD_PLAYER_SPEED_1X;
+        float maxX = lt.maxSeconds * GD_PLAYER_SPEED_1X;
+        return fmt::format(
+            "## YOUR LEVEL REQUEST\n"
+            "Difficulty: {}   Style: {}   Length: {} (~{:.0f}-{:.0f}s, X span ~{:.0f}-{:.0f})\n"
+            "Request: {}\n\n"
+            "Reply with ONLY the level: the short markdown plan, then `## Level Script`, "
+            "then the EAS lines (or a single JSON object). No other commentary.",
+            difficulty, style, lt.label, lt.minSeconds, lt.maxSeconds, minX, maxX, prompt);
+    }
+
+    std::string buildManualBlob(const std::string& prompt) {
+        return buildSystemPrompt() + "\n\n" + buildManualUserBlock(prompt);
+    }
+
+    // Shared core: build the prompt, copy it to the clipboard, record the turn.
+    // UI-agnostic — both the cocos popup and the overlay call this.
+    void doManualCopy(const std::string& prompt) {
+        s_lastUserPrompt = prompt;
+        s_lastSelfRating = 0;
+        s_lastDifficulty = Mod::get()->getSettingValue<std::string>("difficulty");
+        s_lastStyle      = Mod::get()->getSettingValue<std::string>("style");
+        s_lastLength     = Mod::get()->getSettingValue<std::string>("length");
+
+        std::string blob = buildManualBlob(prompt);
+        m_manualPromptBlob = blob;
+        utils::clipboard::write(blob);
+        addToPromptHistory(prompt);
+
+        if (m_session) {
+            if (m_session->title.empty()) {
+                std::string t = prompt;
+                if (t.size() > 40) { GenSession::utf8Trim(t, 39); t += "…"; }
+                m_session->title = t;
+            }
+            m_session->fbPrompt = prompt;
+            m_session->push(GenSession::Entry::Kind::User, prompt);
+            m_session->chatPush(0, prompt);
+        }
+        showStatus(fmt::format("Prompt copied (~{} tokens) - paste into your AI, "
+                               "copy its reply, then Build.", blob.size() / 4));
+    }
+
+    // Cocos popup path (editor AI button): copy, then a Build dialog.
+    void startManualCopy(const std::string& prompt) {
+        doManualCopy(prompt);
+        geode::createQuickPopup(
+            "Prompt copied",
+            gd::string(
+                "The full prompt is on your clipboard.\n\n"
+                "1. Paste it into any AI - ChatGPT, Claude, Gemini, anything.\n"
+                "2. Copy the AI's ENTIRE reply.\n"
+                "3. Come back and press Build.\n\n"
+                "No key, no account - your own chatbot makes the level."),
+            "Close", "Build",
+            [this](FLAlertLayer*, bool build) { if (build) this->onManualBuild(); });
+    }
+
+    // Overlay path: set the generation mode, then copy (no cocos dialog — the
+    // overlay surfaces its own Build button while a manual copy is pending).
+    void startManualHeadless(const std::string& prompt, bool replaceContents) {
+        m_shouldClearLevel = replaceContents;
+        m_editMode = !replaceContents;
+        doManualCopy(prompt);
+    }
+
+    void onManualBuild() {
+        std::string pasted = utils::clipboard::read();
+        if (pasted.empty()) {
+            FLAlertLayer::create("Clipboard Empty",
+                gd::string("Copy your AI's full reply to the clipboard first, then press Build."),
+                "OK")->show();
+            return;
+        }
+        // Guard: Build pressed before the AI's reply was copied — the clipboard
+        // still holds the prompt we wrote.
+        if (pasted == m_manualPromptBlob ||
+            pasted.find("## YOUR LEVEL REQUEST") != std::string::npos) {
+            FLAlertLayer::create("That's the prompt",
+                gd::string("Your clipboard still has the prompt. Paste it into your AI, "
+                           "copy the AI's reply, then press Build."),
+                "OK")->show();
+            return;
+        }
+
+        // Per-generation reset — single-shot, no tool loop, no API follow-up
+        // rounds (m_usingToolLoop = false gates every extension/refine/critique
+        // path in processFinalResponse).
+        m_accumulatedObjects = matjson::Value::array();
+        m_extensionRounds = 0; m_passabilityFixRounds = 0; m_refinementRounds = 0;
+        m_targetObjRounds = 0;  m_editEnforceRounds = 0;
+        m_followUpTurn = false; m_followUpMode = 0;
+        m_critiquePending = false; m_critiqueDone = false; m_decorationPassDone = false;
+        m_usingToolLoop = false;
+        m_toolProvider = "manual"; m_toolModel = "manual"; m_toolApiKey.clear();
+        m_lengthTarget = lengthTargetForSetting(
+            Mod::get()->getSettingValue<std::string>("length"));
+        m_isGenerating = true;
+        if (m_session) m_session->state = GenSession::State::Running;
+
+        showStatus("Building from pasted output...");
+        processFinalResponse(std::move(pasted), "manual");
+    }
+    protected:
 
     // ── API response handler ──────────────────────────────────────────────────
 
@@ -15606,8 +15817,7 @@ public:
             // The numbered inventory the selectors resolve against — rebuilt
             // every edit turn so indices always match what the model sees.
             if (revalidateEditor()) {
-                bool compact = Mod::get()->getSettingValue<bool>("compact-prompts");
-                modeNote += "\n\n" + buildLevelInventoryListing(compact ? 1000 : 2200);
+                modeNote += "\n\n" + buildLevelInventoryListing(1500);
             }
         }
         // Unbounded conversations: past ~40 messages, fold the oldest turns
@@ -16749,6 +16959,45 @@ std::vector<LocalLevelInfo> editoraiListLocalLevels() {
         out.push_back(std::move(info));
     }
     return out;
+}
+
+// ── Manual provider bridge (overlay copy-paste flow) ───────────────────────
+// The engine that copied a prompt and is waiting for the user to paste a reply.
+// A Ref keeps it alive between Copy and Build even though it's never on-scene.
+static Ref<AIGeneratorPopup> s_pendingManual = nullptr;
+
+// Copy step: build the full prompt for the CURRENT editor and put it on the
+// clipboard. Manual builds into the open editor, so one must be open.
+bool editoraiManualCopy(const std::string& prompt, bool replaceContents,
+                        std::string& err) {
+    if (prompt.empty()) { err = "Type a prompt first."; return false; }
+    if (s_inPreviewMode || s_inEditMode) {
+        err = "Finish the current blueprint preview first."; return false;
+    }
+    auto* editor = LevelEditorLayer::get();
+    if (!editor) {
+        err = "Open a level first - Manual builds into the current editor.";
+        return false;
+    }
+    auto* engine = AIGeneratorPopup::create(editor);
+    if (!engine) { err = "Engine creation failed."; return false; }
+    engine->startManualHeadless(prompt, replaceContents);
+    s_pendingManual = engine;   // kept alive until Build (also via its session)
+    return true;
+}
+
+// Is a copied prompt waiting to be built? (overlay shows its Build button)
+bool editoraiManualPending() { return s_pendingManual != nullptr; }
+
+// Build step: read the AI's reply from the clipboard and stage it.
+bool editoraiManualBuild(std::string& err) {
+    if (!s_pendingManual) {
+        err = "Nothing to build - press Copy prompt first."; return false;
+    }
+    AIGeneratorPopup* engine = s_pendingManual;   // Ref -> raw ptr (implicit)
+    s_pendingManual = nullptr;   // consume (engine stays alive via its session)
+    engine->onManualBuild();
+    return true;
 }
 
 bool editoraiStartGeneration(int target, const std::string& prompt,

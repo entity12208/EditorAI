@@ -8,7 +8,7 @@
     },
     "id": "entity12208.edit-ai",
     "name": "Editor AI",
-    "version": "v3.0.0",
+    "version": "v2.1.9",
     "developer": "entity12208",
     "description": "Generate Geometry Dash levels using AI!",
     "dependencies": {
@@ -41,7 +41,8 @@
                 "ollama",
                 "lm-studio",
                 "llama-cpp",
-                "custom"
+                "custom",
+                "manual"
             ]
         },
         "difficulty": {
@@ -116,10 +117,7 @@
             "type": "string",
             "default": "gemini-3-flash",
             "name": "Gemini Model",
-            "one-of": [
-                "gemini-3-flash",
-                "gemini-3-pro"
-            ]
+            "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Gemini model id."
         },
         "gemini-api-key": {
             "type": "string",
@@ -135,10 +133,7 @@
             "type": "string",
             "default": "claude-sonnet-4-6",
             "name": "Claude Model",
-            "one-of": [
-                "claude-sonnet-4-6",
-                "claude-opus-4-6"
-            ]
+            "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Claude model id."
         },
         "claude-api-key": {
             "type": "string",
@@ -154,10 +149,7 @@
             "type": "string",
             "default": "gpt-4o",
             "name": "OpenAI Model",
-            "one-of": [
-                "gpt-4o",
-                "gpt-4.1-mini"
-            ]
+            "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any OpenAI model id."
         },
         "openai-api-key": {
             "type": "string",
@@ -173,13 +165,7 @@
             "type": "string",
             "default": "ministral-8b-latest",
             "name": "Mistral Model",
-            "one-of": [
-                "ministral-3b-latest",
-                "ministral-8b-latest",
-                "mistral-small-latest",
-                "mistral-medium-latest",
-                "mistral-large-latest"
-            ]
+            "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Mistral model id."
         },
         "ministral-api-key": {
             "type": "string",
@@ -227,11 +213,7 @@
             "type": "string",
             "default": "deepseek-chat",
             "name": "DeepSeek Model",
-            "one-of": [
-                "deepseek-chat",
-                "deepseek-reasoner",
-                "deepseek-coder"
-            ]
+            "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any DeepSeek model id."
         },
         "deepseek-api-key": {
             "type": "string",
@@ -354,12 +336,6 @@
         "_advanced-header": {
             "type": "title",
             "name": "Advanced"
-        },
-        "compact-prompts": {
-            "type": "bool",
-            "default": true,
-            "name": "Compact Prompts",
-            "description": "Default ON. Sends a ~3 KB system prompt (vs the full ~60 KB). Cuts cost by ~10× on hosted APIs and runs cleanly on 8K-context local models. Turn off only if you have a >32K-context model and want the full EAS spec + 3,986-entry object catalog in-prompt."
         },
         "enable-ai-tools": {
             "type": "bool",
@@ -486,5 +462,5 @@
         "community": "https://discord.gg/5hwCqMUYNj",
         "homepage": "https://editorai.pages.dev"
     },
-    "about": "Generate Geometry Dash levels by describing them in plain text.\n\n<cy>How to use</c>\nPress <cg>E</c> anywhere (rebindable in Settings; on mobile, tap the floating <cg>AI</c> bubble) to open the EditorAI panel.\n- <cy>Chat</c>: hit <cg>+ new chat</c>, pick a target - the current editor, a brand-new level, or any local level - describe what you want, and Generate. Each generation is a conversation: watch it think and work, then keep talking to it for as long as you like - small edits, big reworks, plans, questions. Conversations survive restarts and pick up where they left off.\n- <cy>Settings</c>: choose among 11 AI providers (Gemini, Claude, OpenAI, OpenRouter, Mistral, HuggingFace, DeepSeek, Ollama/Platinum, LM Studio, llama.cpp, custom), paste your API key, and tune generation.\n\nGenerated objects appear on their own editor layer - the rest of the level fades back - and you accept, edit, or deny the result. Edits the AI makes to existing objects are previewed the same way and fully reversible until you accept."
+    "about": "Generate Geometry Dash levels by describing them in plain text.\n\n<cy>How to use</c>\nPress <cg>E</c> anywhere (rebindable in Settings; on mobile, tap the floating <cg>AI</c> bubble) to open the EditorAI panel.\n- <cy>Chat</c>: hit <cg>+ new chat</c>, pick a target - the current editor, a brand-new level, or any local level - describe what you want, and Generate. Each generation is a conversation: watch it think and work, then keep talking to it for as long as you like - small edits, big reworks, plans, questions. Conversations survive restarts and pick up where they left off.\n- <cy>Settings</c>: choose among 12 AI providers (Gemini, Claude, OpenAI, OpenRouter, Mistral, HuggingFace, DeepSeek, Ollama/Platinum, LM Studio, llama.cpp, custom, and Manual - copy-paste with any chatbot, no key), paste your API key, and tune generation.\n\nGenerated objects appear on their own editor layer - the rest of the level fades back - and you accept, edit, or deny the result. Edits the AI makes to existing objects are previewed the same way and fully reversible until you accept."
 }
