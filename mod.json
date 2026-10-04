@@ -199,28 +199,34 @@
    "type": "title",
    "name": "Providers"
   },
-  "gemini-model": {
-   "type": "string",
-   "default": "gemini-3-flash",
-   "name": "Gemini Model",
-   "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Gemini model id."
-  },
+   "gemini-model": {
+    "type": "string",
+    "default": "gemini-3.8-flash",
+    "name": "Gemini Model",
+    "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Gemini model id."
+   },
   "gemini-api-key": {
    "type": "string",
    "default": "",
    "name": "Gemini API Key",
    "description": "From Google AI Studio. Stays on this device in Geode save data."
   },
+  "disable-thinking": {
+   "type": "bool",
+   "default": true,
+   "name": "Disable Thinking",
+   "description": "For Gemini Flash models, skip the thinking/reasoning phase for much faster (but shallower) answers. Pro models cannot disable thinking and ignore this. Gemini only; takes effect on the next generation."
+  },
   "_provider-claude": {
    "type": "title",
    "name": "Provider — Claude"
   },
-  "claude-model": {
-   "type": "string",
-   "default": "claude-sonnet-4-6",
-   "name": "Claude Model",
-   "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Claude model id."
-  },
+   "claude-model": {
+    "type": "string",
+    "default": "claude-sonnet-5-5",
+    "name": "Claude Model",
+    "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any Claude model id."
+   },
   "claude-api-key": {
    "type": "string",
    "default": "",
@@ -231,12 +237,12 @@
    "type": "title",
    "name": "Provider — OpenAI"
   },
-  "openai-model": {
-   "type": "string",
-   "default": "gpt-4o",
-   "name": "OpenAI Model",
-   "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any OpenAI model id."
-  },
+   "openai-model": {
+    "type": "string",
+    "default": "gpt-6-astra",
+    "name": "OpenAI Model",
+    "description": "Use <cg>Fetch model list</c> in the in-mod Provider tab to pull the live list, or type any OpenAI model id."
+   },
   "openai-api-key": {
    "type": "string",
    "default": "",
@@ -263,12 +269,12 @@
    "type": "title",
    "name": "Provider — Hugging Face"
   },
-  "huggingface-model": {
-   "type": "string",
-   "default": "meta-llama/Llama-3.1-8B-Instruct",
-   "name": "HF Model",
-   "description": "Repo-style id, e.g. meta-llama/Llama-3.1-8B-Instruct."
-  },
+   "huggingface-model": {
+    "type": "string",
+    "default": "meta-llama/Llama-3.1-8B-Instruct",
+    "name": "HF Model",
+    "description": "Repo-style id, e.g. meta-llama/Llama-3.1-8B-Instruct."
+   },
   "huggingface-api-key": {
    "type": "string",
    "default": "",
@@ -279,12 +285,12 @@
    "type": "title",
    "name": "Provider — OpenRouter"
   },
-  "openrouter-model": {
-   "type": "string",
-   "default": "google/gemini-2.5-flash",
-   "name": "OpenRouter Model",
-   "description": "Provider/model slug, e.g. google/gemini-2.5-flash or anthropic/claude-3.5-sonnet."
-  },
+   "openrouter-model": {
+    "type": "string",
+    "default": "google/gemini-3.8-flash",
+    "name": "OpenRouter Model",
+    "description": "Provider/model slug, e.g. google/gemini-3.8-flash or anthropic/claude-3.5-sonnet."
+   },
   "openrouter-api-key": {
    "type": "string",
    "default": "",
@@ -313,7 +319,7 @@
   },
   "groq-model": {
    "type": "string",
-   "default": "llama-3.3-70b-versatile",
+   "default": "openai/gpt-oss-120b",
    "name": "Groq Model",
    "description": "Pick a preset or type any Groq model id in the in-mod Provider tab. Use <cg>Fetch model list</c> to pull the live list."
   },
