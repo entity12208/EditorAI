@@ -595,7 +595,10 @@ public:
 
     // True once a request has been received (or the listener errored/stopped).
     bool done() const { return m_done.load(); }
-    std::string query() const { return m_query; }
+    std::string query() const {
+        std::lock_guard<std::mutex> lk(m_mu);
+        return m_query;
+    }
 
     void stop() {
         m_stopRequested = true;
@@ -629,10 +632,9 @@ private:
         socklen_compat clen = sizeof clientAddr;
         int client = (int)::accept(m_sock, (sockaddr*)&clientAddr, &clen);
         if (client < 0) { m_done = true; return; }
-
-        // Read the request line. HTTP GET; we only need "GET /cb?<query> HTTP/1.1"
-        char buf[4096];
-        if (!waitReadable(client)) {
+        // Only accept loopback peers (this socket is bound to 127.0.0.1, but
+        // belt & suspenders against FD-passing weirdness).
+        if (clientAddr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
 #ifdef _WIN32
             ::closesocket(client);
 #else
@@ -641,21 +643,42 @@ private:
             m_done = true;
             return;
         }
+
+        // Read until end of HTTP headers (\r\n\r\n), 16KB cap. Old code did
+        // one 4KB recv — a browser with cookies easily exceeds that and the
+        // query string got truncated.
+        std::string req;
+        req.reserve(8192);
+        char buf[4096];
+        bool gotHeaders = false;
+        for (int tries = 0; tries < 8; ++tries) {
+            if (!waitReadable(client)) break;
 #ifdef _WIN32
-        int n = ::recv(client, buf, sizeof buf - 1, 0);
+            int n = ::recv(client, buf, sizeof buf, 0);
 #else
-        ssize_t n = ::recv(client, buf, sizeof buf - 1, 0);
+            ssize_t n = ::recv(client, buf, sizeof buf, 0);
 #endif
-        if (n > 0) {
-            buf[n] = 0;
-            std::string req(buf);
-            // Find "GET <path> HTTP/"
+            if (n <= 0) break;
+            req.append(buf, (size_t)n);
+            if (req.size() > 16384) break;
+            if (req.find("\r\n\r\n") != std::string::npos) { gotHeaders = true; break; }
+        }
+        if (gotHeaders) {
+            // Expect "GET /cb?<query> HTTP/..." — ignore anything else
+            // (favicon, stray probes) instead of treating it as OAuth data.
             size_t sp1 = req.find(' ');
             size_t sp2 = sp1 == std::string::npos ? std::string::npos : req.find(' ', sp1 + 1);
-            if (sp1 != std::string::npos && sp2 != std::string::npos) {
+            size_t eol = req.find("\r\n");
+            if (sp1 != std::string::npos && sp2 != std::string::npos && sp2 < eol) {
+                std::string method = req.substr(0, sp1);
                 std::string path = req.substr(sp1 + 1, sp2 - sp1 - 1);
                 auto q = path.find('?');
-                if (q != std::string::npos) m_query = path.substr(q + 1);
+                std::string base = (q == std::string::npos) ? path : path.substr(0, q);
+                if ((method == "GET" || method == "get") &&
+                    (base == "/cb" || base == "/callback" || base == "/")) {
+                    std::lock_guard<std::mutex> lk(m_mu);
+                    m_query = (q == std::string::npos) ? "" : path.substr(q + 1);
+                }
             }
         }
         const char* body =
@@ -663,14 +686,14 @@ private:
             "<h2>You can close this tab.</h2>"
             "<p>Geometry Dash will pick it up from here.</p>"
             "</body></html>";
-        char resp[512];
+        char resp[1024];
         int rlen = std::snprintf(resp, sizeof resp,
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html; charset=utf-8\r\n"
             "Content-Length: %zu\r\n"
             "Connection: close\r\n\r\n%s",
             std::strlen(body), body);
-        if (rlen > 0) ::send(client, resp, rlen, 0);
+        if (rlen > 0 && (size_t)rlen < sizeof resp) ::send(client, resp, (size_t)rlen, 0);
 #ifdef _WIN32
         ::closesocket(client);
 #else
@@ -692,6 +715,7 @@ private:
     }
 
     int  m_sock = -1;
+    mutable std::mutex m_mu;
     std::string m_query;
     std::atomic<bool> m_done{false};
     std::atomic<bool> m_stopRequested{false};
@@ -1225,7 +1249,7 @@ inline bool supportsVision(const std::string& provider, const std::string& model
         return model.find(s) != std::string::npos;
     };
     if (provider == "openai")
-        return has("4o") || has("4.1") || has("vision");
+        return has("gpt-6") || has("gpt-5") || has("gpt-4") || has("4o") || has("4.1") || has("vision");
     // BYOPAK can front the same multimodal models. The locally tested Codex
     // OpenAI-compatible bridge exposes GPT-5/6 this way and accepts image_url
     // parts, so provider identity must not hide the vision tools.
@@ -1343,6 +1367,15 @@ inline std::string urlFor(const std::string& provider, const std::string& model)
         );
     }
     return "";
+}
+
+// "flash" substring check, case-insensitive — model ids are typed by hand
+// ("gemini-2.5-flash", "Gemini-2.5-Flash", ...) and a case-sensitive match
+// would silently leave thinking enabled (slow) on Flash models.
+inline bool isGeminiFlashModel(const std::string& model) {
+    std::string low = model;
+    for (auto& c : low) c = (char)std::tolower((unsigned char)c);
+    return low.find("flash") != std::string::npos;
 }
 
 // ── OpenAI-compatible: tools + messages array, role=tool for tool results ─
@@ -1967,10 +2000,11 @@ inline matjson::Value buildGeminiRequest(const std::vector<Message>& history,
     auto genConfig = matjson::Value::object();
     genConfig["temperature"]     = 0.7;
     genConfig["maxOutputTokens"] = 32768;
-    // Disable the thinking budget for latency — but ONLY on Flash models.
-    // Pro models cannot disable thinking and reject thinkingBudget: 0 with
-    // HTTP 400 INVALID_ARGUMENT.
-    if (model.find("flash") != std::string::npos) {
+    // Disable the thinking budget for latency — but ONLY on Flash models and
+    // only when the user left "Disable Thinking" on. Pro models cannot
+    // disable thinking and reject thinkingBudget: 0 with HTTP 400.
+    if (isGeminiFlashModel(model)
+        && geode::Mod::get()->getSettingValue<bool>("disable-thinking")) {
         auto thinkConfig = matjson::Value::object();
         thinkConfig["thinkingBudget"] = 0;
         genConfig["thinkingConfig"] = thinkConfig;
@@ -2917,42 +2951,135 @@ static std::pair<std::string, std::string> parseAPIError(const std::string& erro
 
 // ─── Per-provider API key / model helpers ─────────────────────────────────────
 
+static std::string sanitizeStoredKey(std::string raw) {
+    // Same invisible-char/Bearer stripping as live input (AIGeneratorPopup::sanitizeApiKey).
+    // Pasted keys often carry trailing newline/space, BOM, zero-width spaces,
+    // NBSP, quotes or a "Bearer " prefix — the #1 cause of 401 with a "correct" key.
+    auto stripInvisible = [](std::string& str) {
+        if (str.size() >= 3 && (unsigned char)str[0]==0xEF && (unsigned char)str[1]==0xBB && (unsigned char)str[2]==0xBF)
+            str.erase(0,3);
+        std::string out; out.reserve(str.size());
+        for (size_t i=0;i<str.size();) {
+            if (i+2 < str.size() && (unsigned char)str[i]==0xE2 && (unsigned char)str[i+1]==0x80 && (unsigned char)str[i+2]==0x8B) { i+=3; continue; } // ZWSP
+            if (i+1 < str.size() && (unsigned char)str[i]==0xC2 && (unsigned char)str[i+1]==0xA0) { i+=2; continue; } // NBSP
+            out.push_back(str[i]); ++i;
+        }
+        str.swap(out);
+    };
+    stripInvisible(raw);
+    const std::string ws = " \t\r\n\"'`";
+    size_t s = raw.find_first_not_of(ws);
+    if (s==std::string::npos) return "";
+    size_t e = raw.find_last_not_of(ws);
+    raw = raw.substr(s, e-s+1);
+    stripInvisible(raw);
+    if (raw.rfind("Bearer ",0)==0) raw = raw.substr(7);
+    else if (raw.rfind("bearer ",0)==0) raw = raw.substr(7);
+    s = raw.find_first_not_of(ws);
+    if (s==std::string::npos) return "";
+    e = raw.find_last_not_of(ws);
+    return raw.substr(s, e-s+1);
+}
+// macOS IME double-insert workaround (paste + Return duplicates the field).
+// On macOS, pasting into a CCTextInputNode leaves an IME composition open
+// and confirming it with Return inserts the pasted text a SECOND time, so
+// the field reads URLURL / KEYKEY. No legitimate value in these settings
+// (URLs, keys, model ids, auth templates, names) is an exact 2x repetition,
+// so an exactly-duplicated value is safely collapsed to one copy.
+// P+P always has even length, so this also catches pastes carrying a
+// trailing newline/BOM ("key\nkey\n" -> "key\n", cleaned by sanitize after).
+static std::string collapseImeDoublePaste(const std::string& v) {
+    if (v.size() >= 2 && (v.size() % 2) == 0) {
+        size_t h = v.size() / 2;
+        if (v.compare(0, h, v, h, h) == 0) return v.substr(0, h);
+    }
+    return v;
+}
 static std::string getProviderApiKey(const std::string& provider) {
-    // Prefer a Sign-In OAuth token when one is saved. Only HuggingFace ships
-    // a true button-only OAuth flow that works from a desktop mod with a
-    // loopback listener. OpenRouter requires https://*:443/3000 callbacks
-    // (per their docs), so its PKCE flow is incompatible — paste-key path
-    // only. Gemini intentionally stays paste-only too.
     if (provider == "huggingface") {
         std::string t = oauth::savedToken(provider);
-        if (!t.empty()) return t;
+        if (!t.empty()) return sanitizeStoredKey(t);
     }
-    if (provider == "gemini")       return Mod::get()->getSettingValue<std::string>("gemini-api-key");
-    if (provider == "claude")       return Mod::get()->getSettingValue<std::string>("claude-api-key");
-    if (provider == "openai")       return Mod::get()->getSettingValue<std::string>("openai-api-key");
-    if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-api-key");
-    if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-api-key");
-    if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-api-key");
-    if (provider == "deepseek")     return Mod::get()->getSettingValue<std::string>("deepseek-api-key");
-    if (provider == "groq")         return Mod::get()->getSettingValue<std::string>("groq-api-key");
-    if (provider == "custom")       return Mod::get()->getSettingValue<std::string>("custom-provider-api-key");
-    return ""; // ollama / local — no key needed
+    std::string raw;
+    if (provider == "gemini")       raw = Mod::get()->getSettingValue<std::string>("gemini-api-key");
+    else if (provider == "claude")       raw = Mod::get()->getSettingValue<std::string>("claude-api-key");
+    else if (provider == "openai")       raw = Mod::get()->getSettingValue<std::string>("openai-api-key");
+    else if (provider == "ministral")    raw = Mod::get()->getSettingValue<std::string>("ministral-api-key");
+    else if (provider == "huggingface")  raw = Mod::get()->getSettingValue<std::string>("huggingface-api-key");
+    else if (provider == "openrouter")   raw = Mod::get()->getSettingValue<std::string>("openrouter-api-key");
+    else if (provider == "deepseek")     raw = Mod::get()->getSettingValue<std::string>("deepseek-api-key");
+    else if (provider == "groq")         raw = Mod::get()->getSettingValue<std::string>("groq-api-key");
+    else if (provider == "custom")       raw = Mod::get()->getSettingValue<std::string>("custom-provider-api-key");
+    else return "";
+    return sanitizeStoredKey(raw);
 }
 
+static std::string trimModelId(std::string s) {
+    const std::string ws = " \t\r\n\"'`";
+    size_t a = s.find_first_not_of(ws);
+    if (a==std::string::npos) return "";
+    size_t b = s.find_last_not_of(ws);
+    s = s.substr(a,b-a+1);
+    // users sometimes paste "models/gemini-..." for openai compat; keep but trim
+    return s;
+}
+// One-time migration for retired model ids. mod.json defaults and presets now
+// track the latest ids from provider docs (e.g. claude-sonnet-5-5, gpt-6-astra,
+// gemini-3.8-flash), but users upgrading from older versions still have the
+// previous defaults stored (e.g. claude-sonnet-4-20250514, which is no longer
+// in any preset list and renders as a stray "custom..." entry). Migrate ONLY
+// those exact outdated defaults to their successors; any other value —
+// including other older preset ids the user may have picked deliberately
+// (e.g. gpt-4.1, gemini-2.5-pro, kimi-k2, ...) — is a custom choice and is
+// left untouched.
+static void migrateRetiredModelsOnce() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    try {
+        auto mod = Mod::get();
+        auto migrate = [&](const char* key, const std::string& cur, const std::string& latest,
+                           const std::vector<const char*>& retired) {
+            for (auto* r : retired) {
+                if (cur == r) {
+                    mod->setSettingValue<std::string>(key, latest);
+                    log::info("Migrated retired model '{}': '{}' -> '{}'", key, cur, latest);
+                    break;
+                }
+            }
+        };
+        // Each entry below is the single previous mod.json default for that
+        // key. Anything else stays as-is so custom user picks survive updates.
+        migrate("claude-model", trimModelId(mod->getSettingValue<std::string>("claude-model")),
+            "claude-sonnet-5-5", {"claude-sonnet-4-20250514"});
+        migrate("openai-model", trimModelId(mod->getSettingValue<std::string>("openai-model")),
+            "gpt-6-astra", {"gpt-4o"});
+        migrate("gemini-model", trimModelId(mod->getSettingValue<std::string>("gemini-model")),
+            "gemini-3.8-flash", {"gemini-2.5-flash"});
+        migrate("openrouter-model", trimModelId(mod->getSettingValue<std::string>("openrouter-model")),
+            "google/gemini-3.8-flash", {"google/gemini-2.5-flash"});
+        // groq default is unchanged (openai/gpt-oss-120b) — no migration, so
+        // custom groq picks are never overwritten.
+    } catch (...) {}
+}
 static std::string getProviderModel(const std::string& provider) {
-    if (provider == "gemini")       return Mod::get()->getSettingValue<std::string>("gemini-model");
-    if (provider == "claude")       return Mod::get()->getSettingValue<std::string>("claude-model");
-    if (provider == "openai")       return Mod::get()->getSettingValue<std::string>("openai-model");
-    if (provider == "ministral")    return Mod::get()->getSettingValue<std::string>("ministral-model");
-    if (provider == "huggingface")  return Mod::get()->getSettingValue<std::string>("huggingface-model");
-    if (provider == "ollama")       return Mod::get()->getSettingValue<std::string>("ollama-model");
-    if (provider == "lm-studio")    return Mod::get()->getSettingValue<std::string>("lm-studio-model");
-    if (provider == "llama-cpp")    return Mod::get()->getSettingValue<std::string>("llama-cpp-model");
-    if (provider == "openrouter")   return Mod::get()->getSettingValue<std::string>("openrouter-model");
-    if (provider == "deepseek")     return Mod::get()->getSettingValue<std::string>("deepseek-model");
-    if (provider == "groq")         return Mod::get()->getSettingValue<std::string>("groq-model");
-    if (provider == "custom")       return Mod::get()->getSettingValue<std::string>("custom-provider-model");
-    return "unknown";
+    migrateRetiredModelsOnce();
+    std::string raw;
+    if (provider == "gemini")       raw = Mod::get()->getSettingValue<std::string>("gemini-model");
+    else if (provider == "claude")       raw = Mod::get()->getSettingValue<std::string>("claude-model");
+    else if (provider == "openai")       raw = Mod::get()->getSettingValue<std::string>("openai-model");
+    else if (provider == "ministral")    raw = Mod::get()->getSettingValue<std::string>("ministral-model");
+    else if (provider == "huggingface")  raw = Mod::get()->getSettingValue<std::string>("huggingface-model");
+    else if (provider == "ollama")       raw = Mod::get()->getSettingValue<std::string>("ollama-model");
+    else if (provider == "lm-studio")    raw = Mod::get()->getSettingValue<std::string>("lm-studio-model");
+    else if (provider == "llama-cpp")    raw = Mod::get()->getSettingValue<std::string>("llama-cpp-model");
+    else if (provider == "openrouter")   raw = Mod::get()->getSettingValue<std::string>("openrouter-model");
+    else if (provider == "deepseek")     raw = Mod::get()->getSettingValue<std::string>("deepseek-model");
+    else if (provider == "groq")         raw = Mod::get()->getSettingValue<std::string>("groq-model");
+    else if (provider == "custom")       raw = Mod::get()->getSettingValue<std::string>("custom-provider-model");
+    else return "unknown";
+    std::string t = trimModelId(raw);
+    return t.empty() ? "unknown" : t;
 }
 
 // ─── Custom provider (BYOPAK — Bring Your Own Provider And Key) ─────────────
@@ -3108,11 +3235,20 @@ static std::string resolveCustomChatUrl(std::string url) {
     size_t first = 0;
     while (first < url.size() && std::isspace((unsigned char)url[first])) ++first;
     if (first) url.erase(0, first);
+    // Pasted "localhost:1234" with no scheme never reaches the server (the
+    // request fails locally, looking like a freeze) — assume plain http.
+    if (!url.empty() && url.find("://") == std::string::npos)
+        url = "http://" + url;
     if (url.find("/chat/completions") == std::string::npos
         && url.find("/v1/messages") == std::string::npos
         && url.find("/completions") == std::string::npos) {
         if (!url.empty() && url.back() == '/') url.pop_back();
-        url += "/v1/chat/completions";
+        // A bare ".../v1" base already carries the version prefix — don't
+        // double it into ".../v1/v1/chat/completions" (404 on every server).
+        if (url.size() >= 3 && url.compare(url.size() - 3, 3, "/v1") == 0)
+            url += "/chat/completions";
+        else
+            url += "/v1/chat/completions";
     }
     return url;
 }
@@ -3315,9 +3451,17 @@ inline Analysis analyzeFile(const std::string& path, const std::string& name) {
         for (unsigned i = 0; i < frames; ++i) {
             double s = 0;
             for (int c = 0; c < channels; ++c) {
-                s += isFloat
-                    ? (double)reinterpret_cast<float*>(buf.data())[i * channels + c]
-                    : (double)reinterpret_cast<int16_t*>(buf.data())[i * channels + c] / 32768.0;
+                // memcpy per sample: buf is vector<char>, may be unaligned —
+                // reinterpret_cast<float*/int16_t*> here is UB (aliasing).
+                double sample = 0;
+                if (isFloat) {
+                    float f = 0; std::memcpy(&f, buf.data() + (i * channels + c) * 4u, 4u);
+                    sample = (double)f;
+                } else {
+                    int16_t v = 0; std::memcpy(&v, buf.data() + (i * channels + c) * 2u, 2u);
+                    sample = (double)v / 32768.0;
+                }
+                s += sample;
             }
             s /= channels;
             acc += s * s;
@@ -3339,13 +3483,19 @@ inline Analysis analyzeFile(const std::string& path, const std::string& name) {
 
     // Autocorrelate the flux over the 60–200 BPM lag range, with harmonic
     // support (half/double tempo) folded into each candidate's score.
+    // Precompute once — old code re-ran O(N) corr per lag ×3 (harmonic).
     const int lagMin = std::max(2, (int)(frameRate * 60.f / 200.f));
     const int lagMax = std::min((int)env.size() / 2, (int)(frameRate * 60.f / 60.f));
-    auto corrAt = [&](int lag) -> double {
-        if (lag < 2 || lag >= (int)flux.size() - 1) return 0.0;
+    const int corrMax = std::min((int)flux.size() - 1, lagMax * 2 + 1);
+    std::vector<double> corr(corrMax + 1, 0.0);
+    for (int lag = 2; lag <= corrMax; ++lag) {
         double s = 0;
-        for (size_t i = 0; i + lag < flux.size(); ++i) s += flux[i] * flux[i + lag];
-        return s / (double)(flux.size() - lag);
+        for (size_t i = 0; i + (size_t)lag < flux.size(); ++i) s += flux[i] * flux[i + lag];
+        corr[lag] = s / (double)(flux.size() - lag);
+    }
+    auto corrAt = [&](int lag) -> double {
+        if (lag < 2 || lag > corrMax) return 0.0;
+        return corr[lag];
     };
     double bestScore = 0, meanScore = 0;
     int bestLag = 0, counted = 0;
@@ -3399,8 +3549,11 @@ inline Analysis analyzeFile(const std::string& path, const std::string& name) {
 }
 
 // Cached per-path analysis. GD sessions touch a handful of songs at most.
+// Mutex + cap 8: analyze runs off the game thread in places, and an
+// unbounded static map grows forever across sessions.
 inline Analysis& analyzeLevelSong(GJGameLevel* level) {
     static std::unordered_map<std::string, Analysis> cache;
+    static std::mutex cacheMu;
     static Analysis missing;
     std::string name;
     std::string path = songPathFor(level, name);
@@ -3413,8 +3566,10 @@ inline Analysis& analyzeLevelSong(GJGameLevel* level) {
         missing.songName = name;
         return missing;
     }
+    std::lock_guard<std::mutex> lk(cacheMu);
     auto it = cache.find(path);
     if (it == cache.end()) {
+        if (cache.size() >= 8) cache.clear();  // simple LRU-ish evict
         log::info("songsync: analyzing '{}' ({})", name, path);
         it = cache.emplace(path, analyzeFile(path, name)).first;
         if (it->second.ok)
@@ -3595,22 +3750,22 @@ inline int tryInt(const std::string& s, int dflt) {
     return res ? res.unwrap() : dflt;
 }
 
-// True iff `s` parses cleanly as a leading number. Lets us probe a positional
-// token: if it's numeric, treat it as x/y; if not, it's a variant/color/kind
-// keyword. Mirrors the try/catch dance the SAW handler did inline.
+// True iff `s` starts with a parseable number (leading-prefix semantics,
+// same as tryFloat: "30," counts as numeric so positional probes agree).
 inline bool isNumericTok(const std::string& s) {
     if (s.empty()) return false;
     size_t i = 0;
-    if (s[i] == '+' || s[i] == '-') ++i;
-    bool sawDigit = false, sawDot = false;
-    for (; i < s.size(); ++i) {
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+    size_t d = i;
+    bool dot = false;
+    while (i < s.size()) {
         unsigned char c = (unsigned char)s[i];
-        if (std::isdigit(c)) { sawDigit = true; continue; }
-        if (c == '.' && !sawDot) { sawDot = true; continue; }
-        if (c == 'e' || c == 'E') { return sawDigit; }
-        return false;
+        if (std::isdigit(c)) { ++i; continue; }
+        if (c == '.' && !dot) { dot = true; ++i; continue; }
+        break;
     }
-    return sawDigit;
+    return i > d;
 }
 
 // First kv key (in order) that's set on the line — returns its float value,
@@ -3801,8 +3956,28 @@ struct ExprParser {
 inline std::string expandRepeatStatement(const std::string& stmt, int idx) {
     std::string out;
     out.reserve(stmt.size() + 8);
+    auto emitVal = [&out](double v) {
+        if (std::abs(v - std::round(v)) < 1e-6 && v < 1e9)
+            out += fmt::format("{:.0f}", v);
+        else
+            out += fmt::format("{:.2f}", v);
+    };
     for (size_t p = 0; p < stmt.size();) {
         if (stmt[p] != '$') { out += stmt[p++]; continue; }
+        // $(...) form allows spaces: "$(i + 1) * 30". Scan to matching paren.
+        if (p + 1 < stmt.size() && stmt[p + 1] == '(') {
+            int depth = 0;
+            size_t q = p + 1;
+            for (; q < stmt.size(); ++q) {
+                if (stmt[q] == '(') ++depth;
+                else if (stmt[q] == ')') { --depth; if (depth == 0) break; }
+            }
+            if (depth != 0) { out += stmt[p++]; continue; }  // unbalanced
+            ExprParser ep(stmt.substr(p + 2, q - p - 2), idx);
+            emitVal(ep.expr());
+            p = q + 1;
+            continue;
+        }
         // Expression = contiguous run of expression characters after the '$'.
         // Space-free: a `$expr` is a single token, so a following positional
         // arg ("SAW $i*40 165") is never absorbed. '.' counts as a decimal
@@ -3822,12 +3997,7 @@ inline std::string expandRepeatStatement(const std::string& stmt, int idx) {
         }
         if (q == p + 1) { out += stmt[p++]; continue; }   // lone '$'
         ExprParser ep(stmt.substr(p + 1, q - p - 1), idx);
-        double v = ep.expr();
-        // Whole number → integer form; otherwise keep two decimals.
-        if (std::abs(v - std::round(v)) < 1e-6 && v < 1e9)
-            out += fmt::format("{:.0f}", v);
-        else
-            out += fmt::format("{:.2f}", v);
+        emitVal(ep.expr());
         p = q;
     }
     return out;
@@ -3860,6 +4030,7 @@ inline std::string orbType(const std::string& color) {
     if (c == "gravity")  return "obj_blue_gravity_orb";
     if (c == "teleport") return "obj_teleport_orb";
     if (c == "toggle")   return "obj_toggle_orb";
+    geode::log::warn("EAS: unknown orb '{}' — using yellow", color);
     return "jump_orb_yellow_jump_orb";
 }
 inline std::string padType(const std::string& color) {
@@ -3869,6 +4040,7 @@ inline std::string padType(const std::string& color) {
     if (c == "red")    return "jump_pad_red_jump_pad";
     if (c == "blue")   return "obj_blue_gravity_pad";
     if (c == "spider") return "obj_spider_pad";
+    geode::log::warn("EAS: unknown pad '{}' — using yellow", color);
     return "jump_pad_yellow_jump_pad";
 }
 inline std::string portalType(const std::string& kind) {
@@ -3897,6 +4069,7 @@ inline std::string portalType(const std::string& kind) {
     if (c == "teleport-orange")  return "portal_unlinked_orange_teleport_portal";
     if (c == "teleport-linked")  return "portal_linked_teleport_portals";
     if (c == "dual")             return "portal_dual_portal";
+    geode::log::warn("EAS: unknown portal '{}' — using cube", kind);
     return "portal_cube_portal";
 }
 inline std::string spikeVariant(const std::string& v) {
@@ -4015,6 +4188,31 @@ inline void applyCommonFields(matjson::Value& obj, const Line& ln) {
     if (ln.kv.count("editor_layer_2"))obj["editor_layer_2"]= (double)ln.inum("editor_layer_2", 0);
 }
 
+// Clamp AI-provided trigger numerics so hallucinations (1e9, -5, NaN)
+// can't corrupt the level. Ranges are GD-sane, not physics-exact.
+inline float clampAt(float v) {
+    if (!std::isfinite(v)) return 0.f;
+    return std::clamp(v, 0.f, 250000.f);
+}
+inline float clampDur(float v, float dflt = 0.5f) {
+    if (!std::isfinite(v)) return dflt;
+    return std::clamp(v, 0.f, 10.f);
+}
+inline float clamp01(float v, float dflt = 1.f) {
+    if (!std::isfinite(v)) return dflt;
+    return std::clamp(v, 0.f, 1.f);
+}
+// groups="1,2" on a TRIGGER line: GD triggers target ONE group. Keep the
+// first (old behavior) but warn so AI typos don't vanish silently.
+inline int firstTargetGroup(const Line& ln) {
+    const char* key = ln.kv.count("target") ? "target" : "groups";
+    if (!ln.kv.count(key)) return 1;
+    std::string s = ln.str(key);
+    if (s.find(',') != std::string::npos)
+        geode::log::warn("EAS: multi-group '{}' on TRIGGER — using first only", s);
+    return ln.inum(key, 1);
+}
+
 // ── Trigger emitter (always position-triggered, never touch-triggered) ─────
 //
 // The mod's downstream code treats `{"type":"<trigger_name>", "x":..., "y":...,
@@ -4061,7 +4259,7 @@ inline ParseResult parse(std::string_view text) {
 
     // Stride through lines
     std::string cur;
-    std::vector<std::string> pending;   // lines queued by REPEAT expansion
+    std::deque<std::string> pending;   // lines queued by REPEAT expansion (deque: O(1) pop_front)
     auto handle_inner = [&](const std::string& raw) {
         auto ln = tokenize(raw);
         if (ln.verb.empty()) return;
@@ -4106,39 +4304,30 @@ inline ParseResult parse(std::string_view text) {
         // times, substituting $i and tiny numeric expressions per iteration.
         // Pure line-splitting + substitution — no interpreter, deterministic.
         if (ln.verb == "repeat") {
-            // Split raw into whitespace tokens to isolate count + statement.
-            std::vector<std::string> toks;
-            {
-                std::string curTok;
-                std::string s = trim(raw);
-                for (size_t ci = 0; ci <= s.size(); ++ci) {
-                    char c = ci < s.size() ? s[ci] : ' ';
-                    if (c == ' ' || c == '\t') {
-                        if (!curTok.empty()) { toks.push_back(curTok); curTok.clear(); }
-                    } else curTok.push_back(c);
-                }
-            }
+            // Isolate count + statement WITHOUT losing quotes: slice `raw`
+            // after the count token instead of re-joining whitespace toks
+            // (old code turned `NAME "a b"` into `NAME "a b"` split apart).
+            std::string s = trim(raw);
+            // skip verb
+            size_t p = 0;
+            while (p < s.size() && s[p] != ' ' && s[p] != '\t') ++p;
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+            // second token = count
+            size_t c0 = p;
+            while (p < s.size() && s[p] != ' ' && s[p] != '\t') ++p;
+            std::string tok1 = s.substr(c0, p - c0);
             int count = 0;
-            size_t stmtStart = 1;
-            if (toks.size() > 1) {
-                if (isNumericTok(toks[1])) {
-                    count = tryInt(toks[1], 0);
-                    stmtStart = 2;
-                } else if (toks[1].rfind("count=", 0) == 0) {
-                    count = tryInt(toks[1].substr(6), 0);
-                    stmtStart = 2;
-                }
+            bool hasCountTok = false;
+            if (!tok1.empty()) {
+                if (isNumericTok(tok1)) { count = tryInt(tok1, 0); hasCountTok = true; }
+                else if (tok1.rfind("count=", 0) == 0) { count = tryInt(tok1.substr(6), 0); hasCountTok = true; }
             }
             if (count <= 0) count = (int)ln.inum("count", 0);
             if (count <= 0 || count > 200) {
                 geode::log::warn("EAS: REPEAT needs a count 1..200 - line skipped");
                 return;
             }
-            std::string stmt;
-            for (size_t t = stmtStart; t < toks.size(); ++t) {
-                if (!stmt.empty()) stmt += " ";
-                stmt += toks[t];
-            }
+            std::string stmt = hasCountTok ? trim(s.substr(p)) : trim(s.substr(c0));
             if (stmt.empty()) { geode::log::warn("EAS: REPEAT has no statement - skipped"); return; }
             // No nesting — a REPEAT whose statement is itself a REPEAT would
             // queue unboundedly. Flatten only one level.
@@ -4184,7 +4373,7 @@ inline ParseResult parse(std::string_view text) {
                 auto t = triggerObj("effect_color_trigger", ln.fnum("at", 0), 0, ln);
                 if (ln.kv.count("ch"))  t["color_channel"] = (double)ln.inum("ch", 1);
                 if (ln.kv.count("hex")) t["color"]         = hexToRGBArray(ln.str("hex"));
-                if (ln.kv.count("duration")) t["duration"] = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"] = (double)clampDur(ln.fnum("duration", 0.5f));
                 if (ln.flag("blend"))        t["blending"] = true;
                 objects.push(t);
                 return;
@@ -4627,41 +4816,41 @@ inline ParseResult parse(std::string_view text) {
         if (ln.verb == "trigger") {
             if (ln.pos.empty()) return;
             std::string kind = lower(ln.pos[0]);
-            float at = ln.fnum("at", 0);
+            float at = clampAt(ln.fnum("at", 0));
             if (kind == "color") {
                 auto t = triggerObj("effect_color_trigger", at, 0, ln);
                 if (ln.kv.count("ch"))       t["color_channel"] = (double)ln.inum("ch", 1);
                 if (ln.kv.count("channel"))  t["color_channel"] = (double)ln.inum("channel", 1);
                 if (ln.kv.count("hex"))      t["color"]         = hexToRGBArray(ln.str("hex"));
-                if (ln.kv.count("duration")) t["duration"]      = (double)ln.fnum("duration", 0.5f);
-                if (ln.kv.count("opacity"))  t["opacity"]       = (double)ln.fnum("opacity", 1.f);
+                if (ln.kv.count("duration")) t["duration"]      = (double)clampDur(clampDur(ln.fnum("duration", 0.5f)));
+                if (ln.kv.count("opacity"))  t["opacity"]       = (double)clamp01(clamp01(ln.fnum("opacity", 1.f)));
                 if (ln.flag("blend"))        t["blending"]      = true;
                 if (ln.flag("blending"))     t["blending"]      = true;
                 objects.push(t);
             } else if (kind == "alpha") {
                 auto t = triggerObj("effect_alpha_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"]  = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"]  = (double)ln.inum("target", 1);
-                if (ln.kv.count("to"))     t["opacity"]       = (double)ln.fnum("to", 1.f);
-                if (ln.kv.count("opacity")) t["opacity"]      = (double)ln.fnum("opacity", 1.f);
-                if (ln.kv.count("duration")) t["duration"]    = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("groups")) t["target_group"]  = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"]  = (double)firstTargetGroup(ln);
+                if (ln.kv.count("to"))     t["opacity"]       = (double)clamp01(ln.fnum("to", 1.f));
+                if (ln.kv.count("opacity")) t["opacity"]      = (double)clamp01(ln.fnum("opacity", 1.f));
+                if (ln.kv.count("duration")) t["duration"]    = (double)clampDur(ln.fnum("duration", 0.5f));
                 objects.push(t);
             } else if (kind == "move") {
                 auto t = triggerObj("effect_move_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"]  = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"]  = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"]  = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"]  = (double)firstTargetGroup(ln);
                 if (ln.kv.count("dx"))     t["move_x"]        = (double)ln.fnum("dx", 0);
                 if (ln.kv.count("dy"))     t["move_y"]        = (double)ln.fnum("dy", 0);
                 if (ln.kv.count("move_x")) t["move_x"]        = (double)ln.fnum("move_x", 0);
                 if (ln.kv.count("move_y")) t["move_y"]        = (double)ln.fnum("move_y", 0);
-                if (ln.kv.count("duration")) t["duration"]    = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"]    = (double)clampDur(ln.fnum("duration", 0.5f));
                 if (ln.flag("lock_to_player_x")) t["lock_to_player_x"] = true;
                 if (ln.flag("lock_to_player_y")) t["lock_to_player_y"] = true;
                 objects.push(t);
             } else if (kind == "toggle") {
                 auto t = triggerObj("effect_toggle_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 t["activate_group"] = ln.flag("on") || ln.flag("activate");
                 objects.push(t);
             } else if (kind == "pulse") {
@@ -4669,10 +4858,10 @@ inline ParseResult parse(std::string_view text) {
                 // Pulse targets EITHER a color channel OR a group, not both.
                 if (ln.kv.count("ch"))       t["target_color_channel"] = (double)ln.inum("ch", 1);
                 if (ln.kv.count("channel"))  t["target_color_channel"] = (double)ln.inum("channel", 1);
-                if (ln.kv.count("groups"))   t["target_group"]         = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))   t["target_group"]         = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))   t["target_group"]         = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))   t["target_group"]         = (double)firstTargetGroup(ln);
                 if (ln.kv.count("hex"))      t["color"]                = hexToRGBArray(ln.str("hex"));
-                if (ln.kv.count("duration")) t["duration"]             = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"]             = (double)clampDur(ln.fnum("duration", 0.5f));
                 if (ln.kv.count("fade_in"))  t["fade_in"]              = (double)ln.fnum("fade_in", 0.f);
                 if (ln.kv.count("hold"))     t["hold"]                 = (double)ln.fnum("hold", 0.f);
                 if (ln.kv.count("fade_out")) t["fade_out"]             = (double)ln.fnum("fade_out", 0.f);
@@ -4680,36 +4869,36 @@ inline ParseResult parse(std::string_view text) {
                 objects.push(t);
             } else if (kind == "rotate") {
                 auto t = triggerObj("effect_rotate_trigger", at, 0, ln);
-                if (ln.kv.count("groups"))  t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))  t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))  t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))  t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.kv.count("center"))  t["center_group"] = (double)ln.inum("center", 1);
                 if (ln.kv.count("degrees")) t["degrees"]      = (double)ln.fnum("degrees", 360);
-                if (ln.kv.count("duration")) t["duration"]    = (double)ln.fnum("duration", 1);
+                if (ln.kv.count("duration")) t["duration"]    = (double)clampDur(ln.fnum("duration", 1), 1.f);
                 if (ln.flag("lock_rotation") || ln.flag("lock_object_rotation"))
                                             t["lock_object_rotation"] = true;
                 objects.push(t);
             } else if (kind == "spawn") {
                 auto t = triggerObj("effect_spawn_trigger", at, 0, ln);
-                if (ln.kv.count("target")) t["target_group"]   = (double)ln.inum("target", 1);
-                if (ln.kv.count("groups")) t["target_group"]   = (double)ln.inum("groups", 1);
+                if (ln.kv.count("target")) t["target_group"]   = (double)firstTargetGroup(ln);
+                if (ln.kv.count("groups")) t["target_group"]   = (double)firstTargetGroup(ln);
                 if (ln.kv.count("delay"))  t["delay"]          = (double)ln.fnum("delay", 0);
                 if (ln.flag("editor_disable")) t["editor_disable"] = true;
                 objects.push(t);
             } else if (kind == "stop") {
                 auto t = triggerObj("effect_stop_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 objects.push(t);
             } else if (kind == "scale") {
                 auto t = triggerObj("effect_scale_trigger", at, 0, ln);
-                if (ln.kv.count("groups"))   t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))   t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))   t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))   t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.kv.count("to"))       t["scale"]        = (double)ln.fnum("to", 1);
-                if (ln.kv.count("duration")) t["duration"]     = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"]     = (double)clampDur(ln.fnum("duration", 0.5f));
                 objects.push(t);
             } else if (kind == "shake") {
                 auto t = triggerObj("effect_shake_trigger", at, 0, ln);
-                if (ln.kv.count("duration")) t["duration"]  = (double)ln.fnum("duration", 1);
+                if (ln.kv.count("duration")) t["duration"]  = (double)clampDur(ln.fnum("duration", 1), 1.f);
                 if (ln.kv.count("strength")) t["strength"]  = (double)ln.fnum("strength", 1);
                 if (ln.kv.count("interval")) t["interval"]  = (double)ln.fnum("interval", 0);
                 objects.push(t);
@@ -4717,14 +4906,14 @@ inline ParseResult parse(std::string_view text) {
                 // TRIGGER zoom at=X zoom=1.5 [duration=T] — 2.2 camera zoom
                 auto t = triggerObj("effect_zoom_camera_trigger", at, 0, ln);
                 if (ln.kv.count("zoom"))     t["zoom"]     = (double)ln.fnum("zoom", 1);
-                if (ln.kv.count("duration")) t["duration"] = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"] = (double)clampDur(ln.fnum("duration", 0.5f));
                 objects.push(t);
             } else if (kind == "static-cam" || kind == "static_cam" || kind == "camera-static") {
                 // TRIGGER static-cam at=X target=G [duration=T] [exit] — lock camera to group
                 auto t = triggerObj("effect_static_camera_trigger", at, 0, ln);
-                if (ln.kv.count("target"))   t["target_group"] = (double)ln.inum("target", 1);
-                if (ln.kv.count("groups"))   t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("duration")) t["duration"]     = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("target"))   t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("groups"))   t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("duration")) t["duration"]     = (double)clampDur(ln.fnum("duration", 0.5f));
                 if (ln.flag("exit"))         t["exit"]         = true;
                 objects.push(t);
             } else if (kind == "offset-cam" || kind == "offset_cam" || kind == "camera-offset") {
@@ -4732,7 +4921,7 @@ inline ParseResult parse(std::string_view text) {
                 auto t = triggerObj("effect_offset_camera_trigger", at, 0, ln);
                 if (ln.kv.count("x"))        t["move_x"]   = (double)ln.fnum("x", 0);
                 if (ln.kv.count("y"))        t["move_y"]   = (double)ln.fnum("y", 0);
-                if (ln.kv.count("duration")) t["duration"] = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"] = (double)clampDur(ln.fnum("duration", 0.5f));
                 objects.push(t);
             } else if (kind == "timewarp") {
                 // TRIGGER timewarp at=X mod=0.5 — slow-mo / speed-up (2.2)
@@ -4756,29 +4945,29 @@ inline ParseResult parse(std::string_view text) {
             } else if (kind == "follow") {
                 // TRIGGER follow at=X target=G follow=G2 [x_mod=1 y_mod=1 duration=T]
                 auto t = triggerObj("effect_follow_trigger", at, 0, ln);
-                if (ln.kv.count("groups"))   t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))   t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))   t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))   t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.kv.count("follow"))   t["follow_group"] = (double)ln.inum("follow", 1);
                 if (ln.kv.count("x_mod"))    t["x_mod"]        = (double)ln.fnum("x_mod", 1);
                 if (ln.kv.count("y_mod"))    t["y_mod"]        = (double)ln.fnum("y_mod", 1);
-                if (ln.kv.count("duration")) t["duration"]     = (double)ln.fnum("duration", 10);
+                if (ln.kv.count("duration")) t["duration"]     = (double)clampDur(ln.fnum("duration", 10), 10.f);
                 objects.push(t);
             } else if (kind == "follow-y" || kind == "follow_y" || kind == "follow-player-y") {
                 // TRIGGER follow-y at=X target=G [speed=S delay=D offset=O max_speed=M duration=T]
                 auto t = triggerObj("effect_follow_player_y_trigger", at, 0, ln);
-                if (ln.kv.count("groups"))    t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))    t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))    t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))    t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.kv.count("speed"))     t["speed"]        = (double)ln.fnum("speed", 1);
                 if (ln.kv.count("delay"))     t["delay"]        = (double)ln.fnum("delay", 0);
                 if (ln.kv.count("offset"))    t["offset"]       = (double)ln.inum("offset", 0);
                 if (ln.kv.count("max_speed")) t["max_speed"]    = (double)ln.fnum("max_speed", 0);
-                if (ln.kv.count("duration"))  t["duration"]     = (double)ln.fnum("duration", 10);
+                if (ln.kv.count("duration"))  t["duration"]     = (double)clampDur(ln.fnum("duration", 10), 10.f);
                 objects.push(t);
             } else if (kind == "touch") {
                 // TRIGGER touch at=X target=G [activate] [hold] — player-tap activation
                 auto t = triggerObj("effect_touch_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.flag("activate"))   t["activate"]     = true;
                 if (ln.flag("hold"))       t["hold"]         = true;
                 objects.push(t);
@@ -4789,8 +4978,8 @@ inline ParseResult parse(std::string_view text) {
                                     at, 0, ln);
                 if (ln.kv.count("item_id")) t["item_id"]      = (double)ln.inum("item_id", 1);
                 if (ln.kv.count("count"))   t["count"]        = (double)ln.inum("count", 1);
-                if (ln.kv.count("groups"))  t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target"))  t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups"))  t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target"))  t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.flag("activate"))    t["activate"]     = true;
                 objects.push(t);
             } else if (kind == "pickup") {
@@ -4802,8 +4991,8 @@ inline ParseResult parse(std::string_view text) {
             } else if (kind == "on-death" || kind == "on_death") {
                 // TRIGGER on-death target=G [activate] — fires when the player dies
                 auto t = triggerObj("effect_on_death_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.flag("activate"))   t["activate"]     = true;
                 objects.push(t);
             } else if (kind == "end") {
@@ -4813,8 +5002,8 @@ inline ParseResult parse(std::string_view text) {
                 // TRIGGER animate groups=G anim=N at=X — play animation N on
                 // the animated objects in group G
                 auto t = triggerObj("effect_animate_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 if (ln.kv.count("anim"))   t["animation_id"] = (double)ln.inum("anim", 0);
                 if (ln.kv.count("animation_id"))
                     t["animation_id"] = (double)ln.inum("animation_id", 0);
@@ -4825,14 +5014,14 @@ inline ParseResult parse(std::string_view text) {
                 auto t = triggerObj("effect_gravity_trigger", at, 0, ln);
                 if (ln.kv.count("g"))        t["gravity"]  = (double)ln.fnum("g", 1.f);
                 if (ln.kv.count("gravity"))  t["gravity"]  = (double)ln.fnum("gravity", 1.f);
-                if (ln.kv.count("duration")) t["duration"] = (double)ln.fnum("duration", 0.5f);
+                if (ln.kv.count("duration")) t["duration"] = (double)clampDur(ln.fnum("duration", 0.5f));
                 objects.push(t);
             } else if (kind == "teleport") {
                 // TRIGGER teleport groups=G at=X — teleport the player to
                 // group G's location (2.2 teleport trigger)
                 auto t = triggerObj("effect_teleport_trigger", at, 0, ln);
-                if (ln.kv.count("groups")) t["target_group"] = (double)ln.inum("groups", 1);
-                if (ln.kv.count("target")) t["target_group"] = (double)ln.inum("target", 1);
+                if (ln.kv.count("groups")) t["target_group"] = (double)firstTargetGroup(ln);
+                if (ln.kv.count("target")) t["target_group"] = (double)firstTargetGroup(ln);
                 objects.push(t);
             } else if (kind == "reverse") {
                 objects.push(triggerObj("effect_reverse_trigger", at, 0, ln));
@@ -4863,9 +5052,12 @@ inline ParseResult parse(std::string_view text) {
     // values instead of needing a catch-all here.
     auto handle = [&](const std::string& raw) { handle_inner(raw); };
     auto drainPending = [&] {
-        while (!pending.empty()) {
+        // Guard: expanded lines are never REPEAT (blocked at expansion), so
+        // this cannot recurse — cap is just belt & suspenders.
+        size_t guard = 0;
+        while (!pending.empty() && guard++ < 5000) {
             std::string p = std::move(pending.front());
-            pending.erase(pending.begin());
+            pending.pop_front();
             handle(p);
         }
     };
@@ -5044,11 +5236,15 @@ inline std::string objectsToEAS(const matjson::Value& objectsArray,
             if (o.contains("groups") && o["groups"].isArray() && o["groups"].size() > 0) {
                 suffix += " groups=";
                 const auto& gs = o["groups"];
+                bool first = true;
                 for (size_t g = 0; g < gs.size(); ++g) {
-                    auto gi = gs[g].asInt();
-                    if (!gi) continue;
-                    if (g) suffix += ",";
-                    suffix += fmt::format("{}", gi.unwrap());
+                    int gv = 0; bool ok = false;
+                    if (auto gi = gs[g].asInt()) { gv = (int)gi.unwrap(); ok = true; }
+                    else if (auto gd = gs[g].asDouble()) { gv = (int)std::lround(gd.unwrap()); ok = true; }
+                    if (!ok) continue;
+                    if (!first) suffix += ",";
+                    first = false;
+                    suffix += fmt::format("{}", gv);
                 }
             }
             auto sc = o["scale"].asDouble();
@@ -5085,20 +5281,33 @@ inline std::string objectsToEAS(const matjson::Value& objectsArray,
             } else if (o.contains("color") && o["color"].isArray() &&
                        o["color"].size() >= 3) {
                 const auto& carr = o["color"];
-                auto rr = carr[0].asInt(); auto gg = carr[1].asInt(); auto bb = carr[2].asInt();
+                auto chanInt = [](const matjson::Value& v) -> int {
+                    if (auto i = v.asInt()) return std::clamp((int)i.unwrap(), 0, 255);
+                    if (auto d = v.asDouble()) return std::clamp((int)std::lround(d.unwrap()), 0, 255);
+                    return 255;
+                };
                 out += fmt::format(" hex={:02x}{:02x}{:02x}",
-                    rr ? std::clamp((int)rr.unwrap(), 0, 255) : 255,
-                    gg ? std::clamp((int)gg.unwrap(), 0, 255) : 255,
-                    bb ? std::clamp((int)bb.unwrap(), 0, 255) : 255);
+                    chanInt(carr[0]), chanInt(carr[1]), chanInt(carr[2]));
             }
-            auto trigCh = o["color_channel"].asInt();
-            if (trigCh) out += fmt::format(" ch={}", trigCh.unwrap());
-            for (auto& [jk, ek] : TRIG_FIELDS) {
-                if (!o.contains(jk)) continue;
-                auto num = o[jk].asDouble();
-                if (num) { out += fmt::format(" {}={}", ek, fmtNum(num.unwrap())); continue; }
-                auto b = o[jk].asBool();
-                if (b && b.unwrap()) out += fmt::format(" {}", ek);
+            {
+                int trigChV = 0;
+                if (auto ti = o["color_channel"].asInt()) trigChV = (int)ti.unwrap();
+                else if (auto td = o["color_channel"].asDouble()) trigChV = (int)std::lround(td.unwrap());
+                if (trigChV) out += fmt::format(" ch={}", trigChV);
+            }
+            {
+                // TRIG_FIELDS has {"opacity","to"} + {"scale","to"} — same EAS
+                // keyword for two JSON fields. Emit at most once per keyword.
+                std::unordered_set<std::string> emitted;
+                for (auto& [jk, ek] : TRIG_FIELDS) {
+                    if (!o.contains(jk)) continue;
+                    if (!emitted.insert(ek).second) continue;
+                    // Prefer double, fall back to int (matjson typed accessors).
+                    if (auto num = o[jk].asDouble()) { out += fmt::format(" {}={}", ek, fmtNum(num.unwrap())); continue; }
+                    if (auto ni = o[jk].asInt()) { out += fmt::format(" {}={}", ek, fmtNum((double)ni.unwrap())); continue; }
+                    auto b = o[jk].asBool();
+                    if (b && b.unwrap()) out += fmt::format(" {}", ek);
+                }
             }
             auto act = o["activate"].asBool();
             if (act && act.unwrap()) out += " activate";
@@ -5111,10 +5320,12 @@ inline std::string objectsToEAS(const matjson::Value& objectsArray,
                 std::string gl;
                 const auto& garr = o["groups"];
                 for (size_t gi = 0; gi < garr.size(); ++gi) {
-                    auto gv = garr[gi].asInt();
-                    if (!gv) continue;
+                    int gv = 0; bool ok = false;
+                    if (auto vi = garr[gi].asInt()) { gv = (int)vi.unwrap(); ok = true; }
+                    else if (auto vd = garr[gi].asDouble()) { gv = (int)std::lround(vd.unwrap()); ok = true; }
+                    if (!ok) continue;
                     if (!gl.empty()) gl += ",";
-                    gl += std::to_string(gv.unwrap());
+                    gl += std::to_string(gv);
                 }
                 if (!gl.empty()) out += fmt::format(" own_groups={}", gl);
             }
@@ -5293,6 +5504,9 @@ inline float getFloat(const matjson::Value& v, const std::string& key, float dfl
 }
 inline int getInt(const matjson::Value& v, const std::string& key, int dflt) {
     if (!v.contains(key)) return dflt;
+    // EAS emits group/id fields as double — accept both (round doubles).
+    auto d = v[key].asDouble();
+    if (d) return (int)std::lround(d.unwrap());
     auto r = v[key].asInt();
     return r ? (int)r.unwrap() : dflt;
 }
@@ -5318,22 +5532,23 @@ inline std::set<int> parseGroups(const matjson::Value& v) {
     std::set<int> out;
     if (!v.contains("groups")) return out;
     auto& g = v["groups"];
+    auto pushNum = [&out](const matjson::Value& n) {
+        if (auto i = n.asInt()) { out.insert((int)i.unwrap()); return; }
+        if (auto d = n.asDouble()) { out.insert((int)std::lround(d.unwrap())); }
+    };
     if (g.isArray()) {
-        for (size_t i = 0; i < g.size(); ++i) {
-            auto n = g[i].asInt();
-            if (n) out.insert((int)n.unwrap());
-        }
+        for (size_t i = 0; i < g.size(); ++i) pushNum(g[i]);
     } else {
-        auto n = g.asInt();
-        if (n) out.insert((int)n.unwrap());
+        pushNum(g);
     }
     return out;
 }
 
 inline int parseSingleGroup(const matjson::Value& v, const char* key) {
     if (!v.contains(key)) return 0;
-    auto n = v[key].asInt();
-    return n ? (int)n.unwrap() : 0;
+    if (auto n = v[key].asInt()) return (int)n.unwrap();
+    if (auto d = v[key].asDouble()) return (int)std::lround(d.unwrap());
+    return 0;
 }
 
 inline Result check(const matjson::Value& objectsArray) {
@@ -5460,7 +5675,8 @@ inline Result check(const matjson::Value& objectsArray) {
     // For each column, a bitmask of blocked Y rows. totalRows is 18 with the
     // constants above, so a uint32 covers the playfield — far cheaper than
     // the old per-column std::set<int> (node allocation per blocked cell).
-    const uint32_t fullMask = totalRows >= 32 ? ~0u : ((1u << totalRows) - 1u);
+    static_assert(18 < 32, "playfield rows must fit in uint32 mask");
+    const uint32_t fullMask = ((1u << totalRows) - 1u);
     std::vector<uint32_t> blockedRows(totalCols, 0u);
     for (const auto& b : blockers) {
         float effHalfW = b.half_w + PLAYER_DETECTION_HALF;
@@ -5470,9 +5686,7 @@ inline Result check(const matjson::Value& objectsArray) {
         int rowStart = std::max(0, (int)((b.y - effHalfH - Y_MIN) / ROW_STEP));
         int rowEnd   = std::min(totalRows - 1, (int)((b.y + effHalfH - Y_MIN) / ROW_STEP));
         if (rowEnd < rowStart) continue;
-        uint32_t rowMask = (rowEnd - rowStart + 1 >= 32)
-            ? ~0u
-            : (((1u << (rowEnd - rowStart + 1)) - 1u) << rowStart);
+        uint32_t rowMask = (((1u << (rowEnd - rowStart + 1)) - 1u) << rowStart);
         for (int c = colStart; c <= colEnd; ++c)
             blockedRows[c] |= rowMask;
     }
@@ -5757,7 +5971,9 @@ inline SimResult simulateCube(const matjson::Value& objectsArray, float groundY)
 
     res.path.reserve(2048);
     float lastPadX = -1e9f;        // a pad fires once per pass, not per tick
-    for (int tick = 0; tick < 12000; ++tick) {
+    // Tick cap scales with level length: 200s fixed cap cut off xxl levels.
+    const int maxTick = std::max(12000, (int)((maxX + 400.f) / VX * 60.f) + 600);
+    for (int tick = 0; tick < maxTick; ++tick) {
         // Mode / speed segment advancement. The multiplier in effect BEFORE
         // crossing a portal moves this tick — GD applies the new speed from
         // the next frame, and matching that avoids stepping over a spike
@@ -5833,7 +6049,7 @@ inline SimResult simulateCube(const matjson::Value& objectsArray, float groundY)
                         fmt::format("corridor too tight for {} ({}u free)",
                                     modeName(mode), (int)bestGap)});
                     if (res.deaths.size() >= 8) break;
-                    x += 60.f;
+                    x += 30.f;  // respawn just past the killer — 60 skipped real zones
                     sinceSample = 0;     // settle before sampling again
                     while (sWin < solids.size()  &&
                            solids[sWin].x  + solids[sWin].halfW  < x - 200.f) ++sWin;
@@ -5944,7 +6160,7 @@ inline SimResult simulateCube(const matjson::Value& objectsArray, float groundY)
         goto survived;
     died:
         if (res.deaths.size() >= 8) break;
-        x += 60.f;                       // respawn-skip past the killer
+        x += 30.f;                       // respawn just past the killer (60 skipped real zones)
         // Catch the sweep windows up to the teleported x before surfaceAt.
         while (sWin < solids.size()  && solids[sWin].x  + solids[sWin].halfW  < x - 200.f) ++sWin;
         while (hWin < hazards.size() && hazards[hWin].x + hazards[hWin].halfW < x - 200.f) ++hWin;
@@ -6011,9 +6227,16 @@ static float computeMaxXFromObjects(const matjson::Value& objectsArray) {
     static const std::unordered_set<std::string> triggerTypes = {
         "color_trigger","move_trigger","pulse_trigger","alpha_trigger",
         "toggle_trigger","spawn_trigger","stop_trigger","rotate_trigger",
+        "scale_trigger","shake_trigger",
         "end_trigger","show_trail_trigger","hide_trail_trigger",
         "show_player_trigger","hide_player_trigger","collision_trigger",
-        "on_death_trigger","count_trigger",
+        "on_death_trigger","count_trigger","instant_count_trigger",
+        "pickup_trigger","animate_trigger","gravity_trigger",
+        "teleport_trigger","reverse_trigger",
+        "zoom_camera_trigger","static_camera_trigger","offset_camera_trigger",
+        "rotate_camera_trigger","edge_camera_trigger","timewarp_trigger",
+        "song_trigger","sfx_trigger","follow_trigger","follow_player_y_trigger",
+        "touch_trigger",
         // EAS triggers go through `effect_*_trigger` aliases
         "effect_color_trigger","effect_move_trigger","effect_pulse_trigger",
         "effect_alpha_trigger","effect_toggle_trigger","effect_spawn_trigger",
@@ -6027,7 +6250,11 @@ static float computeMaxXFromObjects(const matjson::Value& objectsArray) {
         "effect_follow_trigger","effect_follow_player_y_trigger",
         "effect_touch_trigger","effect_count_trigger",
         "effect_instant_count_trigger","effect_pickup_trigger",
-        "effect_on_death_trigger",
+        "effect_on_death_trigger","effect_animate_trigger",
+        "effect_gravity_trigger","effect_teleport_trigger",
+        "effect_reverse_trigger",
+        "effect_background_effect_on_trigger","effect_background_effect_off_trigger",
+        "effect_no_enter_effect_trigger",
     };
     float maxX = 0.f;
     for (size_t i = 0; i < objectsArray.size(); ++i) {
@@ -7626,7 +7853,7 @@ protected:
     struct TabUI { CCNode* on = nullptr; CCNode* off = nullptr; CCLabelBMFont* label = nullptr; };
     std::array<TabUI, 3> m_tabUI{};
 
-    struct TextRow  { std::string sid; TextInput* in; bool password; };
+    struct TextRow  { std::string sid; TextInput* in; bool password; int maxLen = 200; bool revealed = false; CCMenuItemSpriteExtra* showBtn = nullptr; CCMenuItemSpriteExtra* hideBtn = nullptr; };
     struct IntRow   { std::string sid; TextInput* in; int64_t min, max, def; };
     // CycleRow stores a pointer to the value-display label so the arrow
     // handlers can update its text in place — no full tab rebuild on cycle.
@@ -7761,9 +7988,25 @@ protected:
     void onClose(CCObject* o) override { flushInputs(); Popup::onClose(o); }
 
     void flushInputs() {
-        for (auto& r : m_texts)
-            geode::Mod::get()->setSettingValue<std::string>(r.sid,
-                std::string(r.in->getString()));
+        for (auto& r : m_texts) {
+            std::string v = std::string(r.in->getString());
+            // Collapse a macOS paste+Return double-insert BEFORE sanitizing:
+            // the duplicated half may itself carry a trailing newline/BOM
+            // ("key\nkey\n"), which sanitize alone cannot repair.
+            std::string fixed = collapseImeDoublePaste(v);
+            if (fixed != v) {
+                v = fixed;
+                r.in->setString(v);  // visible field matches what is stored
+            }
+            // Sanitize API keys on save: pasted keys often carry a trailing
+            // newline/space, BOM, zero-width chars or a "Bearer " prefix.
+            // Without this the stored key keeps the junk and every validation
+            // / generation request 401s even though the key itself is valid.
+            if (r.sid.find("api-key") != std::string::npos
+                || r.sid.find("api_key") != std::string::npos)
+                v = sanitizeStoredKey(v);
+            geode::Mod::get()->setSettingValue<std::string>(r.sid, v);
+        }
         for (auto& r : m_ints) {
             std::string s = r.in->getString();
             int64_t v = r.def;
@@ -7966,17 +8209,135 @@ protected:
                  const char* desc = nullptr) {
         auto row = makeRow(lbl, desc);
         float w = 150.f;
+        // Right edge of the text field. The Show/Hide key toggle (password
+        // rows) and the mobile Paste button live to its right.
+        float fieldRight = 354.f;
+#ifdef GEODE_IS_MOBILE
+        // Narrow the field to make room for the paste button — many mobile
+        // keyboards (especially on iOS) offer no paste action at all inside
+        // GD text boxes.
+        w = 104.f;
+        fieldRight = 296.f;
+#endif
+        if (password) {
+            // Make room for the Show/Hide toggle next to the field.
+            w = 118.f;
+            fieldRight = 296.f;
+#ifdef GEODE_IS_MOBILE
+            w = 70.f;
+            fieldRight = 210.f;
+#endif
+        }
         auto in = TextInput::create(w, ph, "bigFont.fnt");
         in->setScale(0.6f);
-        // Right edge pinned at x=354.
-        in->setPosition({354.f - (w * 0.6f) / 2.f, ROW_H / 2.f});
+        in->setPosition({fieldRight - (w * 0.6f) / 2.f, ROW_H / 2.f});
         in->setMaxCharCount(maxLen);
         if (password) in->setPasswordMode(true);
         std::string cur = geode::Mod::get()->getSettingValue<std::string>(sid);
         if (!cur.empty()) in->setString(cur);
         row->addChild(in);
-        m_texts.push_back({sid, in, password});
+        m_texts.push_back({sid, in, password, maxLen});
+        if (password) {
+            // Show/Hide toggle for masked keys: a masked field can't be
+            // proofread or repaired by hand, so reveal on demand. Keys stay
+            // masked whenever the popup (re)builds.
+            auto menu = CCMenu::create();
+            menu->setContentSize({56.f, ROW_H});
+            menu->ignoreAnchorPointForPosition(false);
+            menu->setAnchorPoint({0.5f, 0.5f});
+#ifdef GEODE_IS_MOBILE
+            menu->setPosition({240.f, ROW_H / 2.f});
+#else
+            menu->setPosition({326.f, ROW_H / 2.f});
+#endif
+            auto mkBtn = [this, sid](const char* txt, bool visible) {
+                auto spr = ButtonSprite::create(txt, "bigFont.fnt",
+                                                "GJ_button_04.png", 0.35f);
+                auto btn = CCMenuItemSpriteExtra::create(spr, this,
+                    menu_selector(AISettingsPopup::onToggleShowKey));
+                btn->setUserObject(CCString::create(sid));
+                btn->setPosition({28.f, ROW_H / 2.f});
+                btn->setVisible(visible);
+                return btn;
+            };
+            auto& tr = m_texts.back();
+            tr.showBtn = mkBtn("Show", true);
+            tr.hideBtn = mkBtn("Hide", false);
+            menu->addChild(tr.showBtn);
+            menu->addChild(tr.hideBtn);
+            row->addChild(menu);
+        }
+#ifdef GEODE_IS_MOBILE
+        {
+            auto menu = CCMenu::create();
+            menu->setContentSize({64.f, ROW_H});
+            menu->ignoreAnchorPointForPosition(false);
+            menu->setAnchorPoint({0.5f, 0.5f});
+            menu->setPosition({330.f, ROW_H / 2.f});
+            auto spr = ButtonSprite::create("Paste", "bigFont.fnt",
+                                            "GJ_button_04.png", 0.35f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this,
+                menu_selector(AISettingsPopup::onPasteToField));
+            btn->setUserObject(CCString::create(sid));
+            btn->setPosition({32.f, ROW_H / 2.f});
+            menu->addChild(btn);
+            row->addChild(menu);
+        }
+#endif
         pushRow(row);
+    }
+
+#ifdef GEODE_IS_MOBILE
+    // Mobile paste helper: pulls the system clipboard straight into the
+    // settings field. The pressed button carries its field's sid in the
+    // userObject (looked up live, so tab rebuilds can never stale it).
+    void onPasteToField(CCObject* sender) {
+        auto* node = static_cast<CCNode*>(sender);
+        auto* str = static_cast<CCString*>(node ? node->getUserObject() : nullptr);
+        if (!str) return;
+        std::string sid = str->getCString();
+        TextInput* target = nullptr;
+        int maxLen = 0;
+        for (auto& r : m_texts)
+            if (r.sid == sid) { target = r.in; maxLen = r.maxLen; break; }
+        if (!target) return;
+        std::string clip = utils::clipboard::read();
+        auto a = clip.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos) {
+            Notification::create("Clipboard is empty - copy the key/URL first",
+                                 NotificationIcon::Warning)->show();
+            return;
+        }
+        auto b = clip.find_last_not_of(" \t\r\n");
+        clip = clip.substr(a, b - a + 1);
+        if (clip.size() > 2000) {
+            Notification::create("Clipboard too large to paste here",
+                                 NotificationIcon::Warning)->show();
+            return;
+        }
+        if ((int)clip.size() > maxLen) target->setMaxCharCount((int)clip.size());
+        target->setString(clip);
+        Notification::create("Pasted from clipboard", NotificationIcon::Success)->show();
+    }
+#endif
+
+    // Show/Hide toggle for masked API key fields. Flips password mode and
+    // re-sets the string so the label redraws in the new mode (getString
+    // always returns the real text; only the display is masked).
+    void onToggleShowKey(CCObject* sender) {
+        auto* node = static_cast<CCNode*>(sender);
+        auto* str = static_cast<CCString*>(node ? node->getUserObject() : nullptr);
+        if (!str) return;
+        std::string sid = str->getCString();
+        for (auto& r : m_texts) {
+            if (r.sid != sid || !r.in) continue;
+            r.revealed = !r.revealed;
+            r.in->setPasswordMode(!r.revealed);
+            r.in->setString(std::string(r.in->getString()));
+            if (r.showBtn) r.showBtn->setVisible(!r.revealed);
+            if (r.hideBtn) r.hideBtn->setVisible(r.revealed);
+            break;
+        }
     }
 
     void addInt(const char* lbl, const char* sid,
@@ -8404,15 +8765,19 @@ protected:
         // Hosted providers: a free-text field (type ANY model id) plus a row
         // of tappable presets. Type-or-pick — every provider now accepts a
         // custom model id, not just the presets.
-        if (p == "gemini")
+        if (p == "gemini") {
             addModelChooser("gemini-model", "type any Gemini model id",
-                {"gemini-3-flash","gemini-3-pro","gemini-2.5-flash","gemini-2.5-pro"});
+                {"gemini-3.8-flash","gemini-3.5-flash-lite","gemini-3.1-pro","gemma-4-31b-it"});
+            addToggle("Disable thinking", "disable-thinking",
+                "Skips the thinking phase on Flash models: much faster, shallower.\n\n"
+                "Pro models can't disable thinking and ignore this.");
+        }
         else if (p == "claude")
             addModelChooser("claude-model", "type any Claude model id",
-                {"claude-sonnet-4-6","claude-opus-4-6","claude-haiku-4-5"});
+                {"claude-sonnet-5-5","claude-opus-5-5","claude-haiku-4-5"});
         else if (p == "openai")
             addModelChooser("openai-model", "type any OpenAI model id",
-                {"gpt-4o","gpt-4.1-mini","gpt-4.1","o4-mini"});
+                {"gpt-6-astra","gpt-6.1-sol","gpt-6-luna"});
         else if (p == "ministral")
             addModelChooser("ministral-model", "type any Mistral model id",
                 {"ministral-3b-latest","ministral-8b-latest","mistral-small-latest",
@@ -8422,13 +8787,13 @@ protected:
                 {"deepseek-chat","deepseek-reasoner","deepseek-coder"});
         else if (p == "groq")
             addModelChooser("groq-model", "type any Groq model id",
-                {"llama-3.3-70b-versatile","llama-3.1-8b-instant",
-                 "openai/gpt-oss-120b","openai/gpt-oss-20b",
-                 "moonshotai/kimi-k2-instruct"});
+                {"openai/gpt-oss-120b","openai/gpt-oss-20b",
+                 "qwen/qwen3.8-27b"});
         else if (p == "openrouter")
             addModelChooser("openrouter-model", "vendor/model-name",
-                {"google/gemini-2.5-flash","anthropic/claude-sonnet-4",
-                 "openai/gpt-4o","meta-llama/llama-3.3-70b-instruct"});
+                {"google/gemini-3.8-flash","google/gemini-3.5-flash-lite",
+                 "google/gemma-4-31b-it","anthropic/claude-sonnet-5-5",
+                  "openai/gpt-6-astra","meta-llama/llama-3.3-70b-instruct"});
         else if (p == "huggingface")
             addModelChooser("huggingface-model", "owner/repo",
                 {"meta-llama/Llama-3.1-8B-Instruct","Qwen/Qwen2.5-7B-Instruct"});
@@ -8644,8 +9009,10 @@ protected:
     void onSaveAndTest(CCObject*) {
         flushInputs();
         std::string p = geode::Mod::get()->getSettingValue<std::string>("ai-provider");
-        std::string key = geode::Mod::get()->getSettingValue<std::string>(
-            p == "custom" ? "custom-provider-api-key" : (p + "-api-key"));
+        // Use the sanitized key (flushInputs already stored the cleaned value).
+        // The old code read the raw setting here, so a pasted key with a
+        // trailing newline/space always 401d even when the key was valid.
+        std::string key = getProviderApiKey(p);
         if (key.empty()) {
             setAuthStatus("No key to test.", ui::ERROR_COL); return;
         }
@@ -8654,6 +9021,7 @@ protected:
         runValidate(p, key);
     }
     void onTestKey(CCObject*) {
+        flushInputs();
         std::string p = geode::Mod::get()->getSettingValue<std::string>("ai-provider");
         std::string key = getProviderApiKey(p);
         setAuthStatus("Testing...", ui::BUSY_COL);
@@ -8688,8 +9056,19 @@ protected:
         m_authNet.spawn(req.get(url),
             [this](web::WebResponse resp) {
                 if (resp.ok()) setAuthStatus("✓ Connected.", ui::SUCCESS_COL);
-                else setAuthStatus(fmt::format("✗ HTTP {}.", resp.code()),
+                else if (resp.code() == 401)
+                    setAuthStatus("✗ HTTP 401: key rejected. Re-paste key, Save & test.",
                                    ui::ERROR_COL);
+                else {
+                    // Show the provider's error snippet so a wrong model /
+                    // quota / permission failure isn't mistaken for a bad key.
+                    std::string body = resp.string().unwrapOr("");
+                    for (auto& c : body) if (c == '\n' || c == '\r') c = ' ';
+                    if (body.size() > 120) body = body.substr(0, 120);
+                    std::string msg = fmt::format("✗ HTTP {}.", resp.code());
+                    if (!body.empty()) msg += " " + body;
+                    setAuthStatus(msg, ui::ERROR_COL);
+                }
             });
     }
 
@@ -8720,6 +9099,11 @@ protected:
         if (provider == "custom") {
             std::string base = geode::Mod::get()->getSettingValue<std::string>("custom-provider-url");
             if (base.empty()) return "";
+            while (!base.empty() && std::isspace((unsigned char)base.back())) base.pop_back();
+            size_t f = 0;
+            while (f < base.size() && std::isspace((unsigned char)base[f])) ++f;
+            if (f) base.erase(0, f);
+            if (base.find("://") == std::string::npos) base = "http://" + base;
             auto pos = base.find("/chat/completions");
             if (pos != std::string::npos) base = base.substr(0, pos);
             while (!base.empty() && base.back() == '/') base.pop_back();
@@ -9849,9 +10233,9 @@ public:
 // Struct lives in sessions.hpp (shared with overlay.cpp); the registry and
 // engine seam functions are defined here.
 
-static bool s_sessionsDirty  = false;
+static std::atomic<bool> s_sessionsDirty{false};
 static int  s_sessionsNextId = 1;
-void editoraiMarkSessionsDirty() { s_sessionsDirty = true; }
+void editoraiMarkSessionsDirty() { s_sessionsDirty.store(true, std::memory_order_relaxed); }
 
 // Load persisted sessions once, on first registry access. Restored sessions
 // are read-only history: the engine (in-flight network state, tool history)
@@ -9954,7 +10338,7 @@ static void loadPersistedSessions(std::vector<std::shared_ptr<GenSession>>& out)
         if (s->id >= s_sessionsNextId) s_sessionsNextId = s->id + 1;
         out.push_back(std::move(s));
     }
-    s_sessionsDirty = false;  // loading isn't a change
+    s_sessionsDirty.store(false, std::memory_order_relaxed);  // loading isn't a change
     log::info("EditorAI: restored {} session(s) from disk", out.size());
 }
 
@@ -9971,8 +10355,7 @@ std::vector<std::shared_ptr<GenSession>>& genSessions() {
 // pattern). Throttled by the dirty flag — the overlay ticks this every
 // few seconds and $on_mod(DataSaved) flushes on exit.
 void editoraiPersistSessionsIfDirty() {
-    if (!s_sessionsDirty) return;
-    s_sessionsDirty = false;
+    if (!s_sessionsDirty.exchange(false, std::memory_order_acq_rel)) return;
     auto arr = matjson::Value::array();
     for (auto& s : genSessions()) {
         if (!s) continue;
@@ -10043,7 +10426,7 @@ void editoraiPersistSessionsIfDirty() {
 }
 
 $on_mod(DataSaved) {
-    s_sessionsDirty = true;          // force a flush even if throttle just ran
+    s_sessionsDirty.store(true, std::memory_order_relaxed);  // force a flush even if throttle just ran
     editoraiPersistSessionsIfDirty();
 }
 
@@ -13497,16 +13880,42 @@ protected:
 
     // ── API call ──────────────────────────────────────────────────────────────
 
-    // Strips leading/trailing ASCII whitespace (spaces, tabs, newlines, carriage
-    // returns). API keys are frequently copy-pasted with invisible trailing
-    // characters that cause 401/403 responses even when the key is valid.
-    static std::string trimKey(std::string s) {
-        const std::string ws = " \t\r\n";
+    // Strips leading/trailing whitespace + invisible chars that users paste
+    // accidentally (BOM, zero-width spaces, quotes, "Bearer " prefix). This is
+    // the #1 cause of 401 despite "correct" key.
+    static std::string sanitizeApiKey(std::string s) {
+        // 1) Trim ASCII whitespace + common invisible unicode (BOM, ZWSP, NBSP)
+        // BOM = EF BB BF, ZWSP = E2 80 8B, NBSP = C2 A0 in UTF-8
+        auto stripInvisible = [](std::string& str) {
+            // remove UTF-8 BOM at start
+            if (str.size() >= 3 && (unsigned char)str[0]==0xEF && (unsigned char)str[1]==0xBB && (unsigned char)str[2]==0xBF)
+                str.erase(0,3);
+            std::string out; out.reserve(str.size());
+            for (size_t i=0;i<str.size();) {
+                if (i+2 < str.size() && (unsigned char)str[i]==0xE2 && (unsigned char)str[i+1]==0x80 && (unsigned char)str[i+2]==0x8B) { i+=3; continue; } // ZWSP
+                if (i+1 < str.size() && (unsigned char)str[i]==0xC2 && (unsigned char)str[i+1]==0xA0) { i+=2; continue; } // NBSP -> skip
+                out.push_back(str[i]); ++i;
+            }
+            str.swap(out);
+        };
+        stripInvisible(s);
+        const std::string ws = " \t\r\n\"'`";
         size_t start = s.find_first_not_of(ws);
         if (start == std::string::npos) return "";
         size_t end = s.find_last_not_of(ws);
-        return s.substr(start, end - start + 1);
+        s = s.substr(start, end - start + 1);
+        stripInvisible(s);
+        // 2) If user pasted "Bearer sk-..." or "sk-..." with prefix, strip it
+        if (s.rfind("Bearer ", 0)==0) s = s.substr(7);
+        else if (s.rfind("bearer ", 0)==0) s = s.substr(7);
+        // 3) re-trim after prefix removal
+        start = s.find_first_not_of(ws);
+        if (start == std::string::npos) return "";
+        end = s.find_last_not_of(ws);
+        s = s.substr(start, end - start + 1);
+        return s;
     }
+    static std::string trimKey(std::string s) { return sanitizeApiKey(std::move(s)); }
 
     // ── Tool 1: download a reference level from GD's servers ───────────────
     // Builds a compact summary the AI can use as design inspiration. Skips
@@ -14499,9 +14908,22 @@ protected:
     // Entry point. Called instead of callAPI's single-shot when tool use is
     // enabled and the selected provider supports it.
     void runToolLoop(const std::string& userPrompt, const std::string& rawApiKey) {
-        m_toolApiKey   = trimKey(rawApiKey);
+        m_toolApiKey   = sanitizeApiKey(rawApiKey);
+        if (m_toolApiKey.empty()) m_toolApiKey = getProviderApiKey(Mod::get()->getSettingValue<std::string>("ai-provider"));
         m_toolProvider = Mod::get()->getSettingValue<std::string>("ai-provider");
         m_toolModel    = getProviderModel(m_toolProvider);
+        if (m_toolModel.empty() || m_toolModel=="unknown") {
+            onError("Invalid Model", fmtUserError("No model configured for provider '"+m_toolProvider+"'.",
+                "Open Settings → Provider tab and pick a model.", makeErrorCode(m_toolProvider,40,0)));
+            return;
+        }
+        if (m_toolApiKey.empty() && m_toolProvider!="ollama" && m_toolProvider!="lm-studio" && m_toolProvider!="llama-cpp" && m_toolProvider!="manual" && m_toolProvider!="custom") {
+            onError("API Key Required", fmtUserError("No API key saved for provider '"+m_toolProvider+"' (tool loop would get HTTP 401).",
+                "Open Settings → paste a fresh key, then save.", makeErrorCode(m_toolProvider,20,1)));
+            return;
+        }
+        // Diagnostics only: never log key material or fragments (first/last chars).
+        log::debug("Tool loop preflight: provider={} model='{}' hasKey={}", m_toolProvider, m_toolModel, !m_toolApiKey.empty());
         // Tool use is unbounded — no round budget. The model runs until it
         // emits a final answer; duplicate-call reuse prevents accidental
         // repeated network work, while Cancel remains available throughout.
@@ -17767,9 +18189,10 @@ protected:
             genConfig["temperature"]     = 0.7;
             genConfig["maxOutputTokens"] = 65536;
             // Disable the thinking budget for latency — but ONLY on Flash
-            // models. Pro models cannot disable thinking and reject
-            // thinkingBudget: 0 with HTTP 400 INVALID_ARGUMENT.
-            if (model.find("flash") != std::string::npos) {
+            // models with "Disable Thinking" on. Pro models cannot disable
+            // thinking and reject thinkingBudget: 0 with HTTP 400.
+            if (toolUse::isGeminiFlashModel(model)
+                && Mod::get()->getSettingValue<bool>("disable-thinking")) {
                 auto thinkingConfig = matjson::Value::object();
                 thinkingConfig["thinkingBudget"] = 0;
                 genConfig["thinkingConfig"] = thinkingConfig;
@@ -17889,6 +18312,24 @@ protected:
                 // Same endpoints the tool-use loop hits.
                 url = toolUse::urlFor(provider, model);
             }
+        }
+
+        // ── Pre-flight validation (prevents opaque 400/401) ───────────────
+        if (model.empty() || model=="unknown") {
+            onError("Invalid Model", fmtUserError("No model configured for provider '"+provider+"'.",
+                "Open Settings → Provider tab and pick a model (use Fetch model list).", makeErrorCode(provider,40,0)));
+            return;
+        }
+        if (provider!="ollama" && provider!="lm-studio" && provider!="llama-cpp" && provider!="manual" && provider!="custom" && apiKey.empty()) {
+            onError("API Key Required", fmtUserError("No API key saved for provider '"+provider+"' (HTTP 401 would follow).",
+                "Open Settings → paste a fresh key from the provider dashboard, then save.", makeErrorCode(provider,20,1)));
+            return;
+        }
+        // Diagnostics only: never log key material, fragments, or length.
+        {
+            log::debug("API preflight: provider={} model='{}' hasKey={} url='{}'", provider, model, !apiKey.empty(), url);
+            if (apiKey.size()<8 && provider!="ollama" && provider!="lm-studio" && provider!="llama-cpp" && provider!="manual" && provider!="custom")
+                log::warn("API key looks suspiciously short — pasted correctly?");
         }
 
         std::string jsonBody = requestBody.dump();
@@ -20811,12 +21252,16 @@ void editoraiSetBool(const char* id, bool v) {
          req.header("Content-Type", "application/json");
          req.bodyString(body.dump());
      }
-     auto finish = [](web::WebResponse resp) {
-         s_testStatus = resp.ok()
-             ? "✓ Connected."
-             : fmt::format("✗ HTTP {}. Check URL, auth template, and server API compatibility.", resp.code());
-         s_testInFlight = false;
-     };
+      auto finish = [](web::WebResponse resp) {
+          if (resp.ok()) {
+              s_testStatus = "✓ Connected.";
+          } else if (resp.code() == 401) {
+              s_testStatus = "✗ HTTP 401: key rejected. Re-paste the key for THIS provider, Save/Test again (typing alone doesn't save).";
+          } else {
+              s_testStatus = fmt::format("✗ HTTP {}. Check URL, auth template, and server API compatibility.", resp.code());
+          }
+          s_testInFlight = false;
+      };
      if (postCustom) s_testTask.spawn(req.post(url), finish);
      else            s_testTask.spawn(req.get(url),  finish);
  }
