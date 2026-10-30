@@ -1,0 +1,33 @@
+# Patch for iOS SDK 5.10.1 bug: CCKeyboardDispatcher modify has empty AddressInline_
+# Fix 1: Patch Modify.hpp to handle empty AddressInline_ (static auto address = ; -> compile error)
+# Change `static auto address = AddressInline_;` to `static auto address = (AddressInline_ + 0);`
+# which evaluates to 0 when empty and to the address otherwise.
+
+# Try to patch the SDK's Modify.hpp if it exists (configure-time and build-time)
+foreach(_sdk_path IN ITEMS "$ENV{GEODE_SDK}" "${CMAKE_CURRENT_SOURCE_DIR}/geode-sdk-clone" "/Users/runner/work/EditorAI-optimized/EditorAI-optimized/geode-sdk-clone")
+  set(_mod_file "${_sdk_path}/loader/include/Geode/modify/Modify.hpp")
+  if(EXISTS "${_mod_file}")
+    file(READ "${_mod_file}" _content)
+    if(_content MATCHES "static auto address = AddressInline_;")
+      string(REPLACE "static auto address = AddressInline_;" "static auto address = (AddressInline_ + 0);" _content "${_content}")
+      file(WRITE "${_mod_file}" "${_content}")
+      message(STATUS "Patched Modify.hpp at ${_mod_file} for iOS empty address bug")
+    endif()
+  endif()
+endforeach()
+
+# Fix 2: Also patch the generated CCKeyboardDispatcher.hpp if it already exists (post-codegen)
+set(_patch_file "${CMAKE_CURRENT_BINARY_DIR}/bindings/bindings/Geode/modify/CCKeyboardDispatcher.hpp")
+if(NOT EXISTS "${_patch_file}")
+  set(_patch_file "${CMAKE_BINARY_DIR}/bindings/bindings/Geode/modify/CCKeyboardDispatcher.hpp")
+endif()
+if(EXISTS "${_patch_file}")
+  file(READ "${_patch_file}" _c)
+  string(FIND "${_c}" "GEODE_APPLY_MODIFY_FOR_CONSTRUCTOR(, Default, cocos2d::CCKeyboardDispatcher" _found)
+  if(NOT _found EQUAL -1)
+    string(REPLACE "GEODE_APPLY_MODIFY_FOR_CONSTRUCTOR(, Default, cocos2d::CCKeyboardDispatcher, )" "// PATCHED IOS: constructor disabled" _c "${_c}")
+    string(REPLACE "GEODE_APPLY_MODIFY_FOR_DESTRUCTOR(, Default, cocos2d::CCKeyboardDispatcher)" "// PATCHED IOS: destructor disabled" _c "${_c}")
+    file(WRITE "${_patch_file}" "${_c}")
+    message(STATUS "Patched ${_patch_file} for iOS")
+  endif()
+endif()

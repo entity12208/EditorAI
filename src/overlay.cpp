@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <unordered_set>
 #include <cstring>
 #include <unordered_map>
@@ -273,10 +274,26 @@ void settingInt(const char* label, const char* id, int mn, int mx,
 // editing flags for fields NOT rendered this frame — settingText is used in
 // BOTH tabs (composer's custom difficulty/style), and a blanket clear while
 // the Chat tab renders one would clobber in-progress typing every frame.
-struct TextBuf { std::array<char, 256> buf{}; bool editing = false; int lastFrame = -1; };
+struct TextBuf { std::array<char, 1024> buf{}; bool editing = false; int lastFrame = -1; };
 std::unordered_map<std::string, TextBuf>& textBufs() {
     static std::unordered_map<std::string, TextBuf> b;
     return b;
+}
+
+// Flush staged ImGui text buffers into Geode settings. settingText() only
+// writes back on IsItemDeactivatedAfterEdit, so a user who types an API key
+// and immediately hits "Test connection" would otherwise test the OLD key
+// (stale buffer → spurious HTTP 401). Call before any network probe that
+// reads the key / URL / model from settings.
+// Only flush fields rendered this frame: a hidden custom-model buffer must
+// not clobber a freshly picked preset (preset pick hides the text field,
+// leaving a stale buf behind).
+void flushTextBufs() {
+    int curFrame = ImGui::GetFrameCount();
+    for (auto& [id, tb] : textBufs()) {
+        if (tb.lastFrame != curFrame) continue;
+        editoraiSetStr(id.c_str(), tb.buf.data());
+    }
 }
 
 // Named BYOPAK profiles. Geode saved values live in this mod's local save
@@ -400,14 +417,57 @@ void settingText(const char* label, const std::string& id,
         std::string cur = editoraiGetStr(id.c_str());
         snprintf(tb.buf.data(), tb.buf.size(), "%s", cur.c_str());
     }
+    // Per-field key reveal (masked fields can't be proofread by hand).
+    // Defaults to hidden every restart; the buffer itself always holds the
+    // real text, only the display is masked.
+    static std::unordered_map<std::string, bool> revealed;
+    bool show = secret && revealed[id];
     ImGui::SetNextItemWidth(std::min(280.f, ImGui::GetContentRegionAvail().x));
     ImGui::InputTextWithHint(fmt::format("{}##{}", label, id).c_str(), hint,
         tb.buf.data(), tb.buf.size(), TEXT_SELECTION_FLAGS |
-        (secret ? ImGuiInputTextFlags_Password : ImGuiInputTextFlags_None),
+        (secret && !show ? ImGuiInputTextFlags_Password : ImGuiInputTextFlags_None),
         textSelectionCallback);
     tb.editing = ImGui::IsItemActive();
     tipIfHovered(tip);
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
+    // Capture BEFORE the Show/Hide button below: afterwards "last item" is
+    // the button, and this query would read the wrong widget.
+    bool finished = ImGui::IsItemDeactivatedAfterEdit();
+    if (secret) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(fmt::format("{}##show-{}",
+                show ? "Hide" : "Show", id).c_str())) {
+            revealed[id] = !show;
+            // Force the buffer back through the widget so it redraws in the
+            // new mode even while it keeps focus.
+            tb.editing = false;
+        }
+        tipIfHovered("Reveal the key to proofread or repair it by hand.");
+    }
+    // Mobile keyboards (especially on iOS) often offer no paste action at
+    // all, so every settings field gets its own Paste button that pulls the
+    // system clipboard straight into the field.
+    if (uiMobile()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton(fmt::format("Paste##paste-{}", id).c_str())) {
+            if (const char* clip = ImGui::GetClipboardText()) {
+                std::string s = clip;
+                auto a = s.find_first_not_of(" \t\r\n");
+                if (a != std::string::npos) {
+                    auto b = s.find_last_not_of(" \t\r\n");
+                    s = s.substr(a, b - a + 1);
+                    snprintf(tb.buf.data(), tb.buf.size(), "%s", s.c_str());
+                    tb.editing = false;
+                    editoraiSetStr(id.c_str(), tb.buf.data());
+                    if (autoBypass && tb.buf[0]) {
+                        editoraiSetBool("bypass-char-filter", true);
+                        editoraiSetBool("bypass-char-limit", true);
+                    }
+                }
+            }
+        }
+        tipIfHovered("Paste from the system clipboard.");
+    }
+    if (finished) {
         editoraiSetStr(id.c_str(), tb.buf.data());
         if (autoBypass && tb.buf[0]) {
             editoraiSetBool("bypass-char-filter", true);
@@ -968,7 +1028,17 @@ void settingModelCombo(const char* id,
     if (ImGui::BeginCombo(fmt::format("model##{}", id).c_str(), preview)) {
         for (auto* opt : presets) {
             bool sel = !custom && cur == opt;
-            if (ImGui::Selectable(opt, sel)) { editoraiSetStr(id, opt); custom = false; }
+            if (ImGui::Selectable(opt, sel)) {
+                editoraiSetStr(id, opt);
+                custom = false;
+                // Sync the text buffer immediately: otherwise the hidden
+                // custom-model buffer still holds the old free-text value and
+                // a later flushTextBufs() (Test connection) would undo this pick.
+                auto& tb = textBufs()[id];
+                snprintf(tb.buf.data(), tb.buf.size(), "%s", opt);
+                tb.editing = false;
+                tb.lastFrame = ImGui::GetFrameCount();
+            }
             if (sel) ImGui::SetItemDefaultFocus();
         }
         ImGui::Separator();
@@ -1046,13 +1116,13 @@ void providerModelWidget(const std::string& p) {
                       "any model id.";
     if (p == "gemini")
         settingModelCombo("gemini-model",
-            {"gemini-3-flash", "gemini-3-pro", "gemini-2.5-flash", "gemini-2.5-pro"}, tip);
+            {"gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro", "gemma-4-31b-it"}, tip);
     else if (p == "claude")
         settingModelCombo("claude-model",
-            {"claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"}, tip);
+            {"claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5"}, tip);
     else if (p == "openai")
         settingModelCombo("openai-model",
-            {"gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"}, tip);
+            {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"}, tip);
     else if (p == "ministral")
         settingModelCombo("ministral-model",
             {"ministral-3b-latest", "ministral-8b-latest", "mistral-small-latest",
@@ -1062,16 +1132,15 @@ void providerModelWidget(const std::string& p) {
             {"deepseek-chat", "deepseek-reasoner", "deepseek-coder"}, tip);
     else if (p == "groq")
         settingModelCombo("groq-model",
-            {"llama-3.3-70b-versatile", "llama-3.1-8b-instant",
-             "openai/gpt-oss-120b", "openai/gpt-oss-20b",
-             "moonshotai/kimi-k2-instruct"}, tip);
+            {"openai/gpt-oss-120b", "openai/gpt-oss-20b",
+             "qwen/qwen3.8-27b"}, tip);
     else if (p == "huggingface")
         settingModelCombo("huggingface-model",
             {"meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen2.5-7B-Instruct"}, tip);
     else if (p == "openrouter")
         settingModelCombo("openrouter-model",
-            {"google/gemini-2.5-flash", "anthropic/claude-sonnet-4",
-             "openai/gpt-4o", "meta-llama/llama-3.3-70b-instruct"}, tip);
+            {"google/gemini-3.8-flash", "google/gemini-3.5-flash-lite", "google/gemma-4-31b-it", "anthropic/claude-sonnet-5-5",
+             "openai/gpt-6-astra", "meta-llama/llama-3.3-70b-instruct"}, tip);
     else if (p == "ollama")
         ollamaModelSelector();
     else if (p == "lm-studio")
@@ -1776,7 +1845,7 @@ void tabSettings() {
             // Test connection — a real authenticated probe of the current
             // provider (the same endpoints the AI generation calls).
             ImGui::SameLine();
-            if (ImGui::SmallButton("Test connection")) editoraiTestProvider();
+            if (ImGui::SmallButton("Test connection")) { flushTextBufs(); editoraiTestProvider(); }
             tipIfHovered("Sends a tiny authenticated request to this provider "
                          "to confirm the key/URL work before you generate.");
             std::string tstat = editoraiTestStatus();
@@ -1819,6 +1888,10 @@ void tabSettings() {
                 "Stored locally on this device and only sent to the "
                 "provider itself.", true);
         }
+        if (p == "gemini")
+            settingToggle("disable thinking (faster, shallower)", "disable-thinking",
+                "Skips the thinking phase on Flash models. Pro models can't "
+                "disable thinking and ignore this.");
         // One-click sign-in where the provider supports it — no key-copying.
         if (editoraiOAuthAvailable(p)) {
             ImGui::BeginDisabled(editoraiOAuthActive());
@@ -2020,6 +2093,243 @@ void tabSettings() {
 }
 
 // ── Main draw ─────────────────────────────────────────────────────────────────
+#ifdef GEODE_IS_MOBILE
+// ── Native cocos floating bubble (mobile) ────────────────────────────────────
+// Eclipse-style: a real CCMenu targeted touch delegate, NOT an ImGui window.
+// ImGui's touch emulation only delivers hover on the first tap, which forced
+// a double-press before any drag could start — raw touches have no such
+// problem: press-and-move drags from the very first touch.
+//
+// Behavior: round ~62 px bubble; drag freely (position saved across restarts);
+// a quick tap toggles the panel; auto-dims to 50% after 5 s untouched;
+// hidden completely inside any level (PlayLayer exists).
+//
+// The circle art is baked into a runtime texture once so a plain CCSprite
+// shows it — sprites honor setOpacity reliably.
+CCTexture2D* eaiMakeBubbleTexture() {
+    constexpr int S = 112;
+    constexpr float R = 54.f;
+    constexpr float RING = 6.f;
+    auto* data = new unsigned char[(size_t)S * S * 4];
+    for (int y = 0; y < S; ++y) {
+        for (int x = 0; x < S; ++x) {
+            float dx = (float)x + 0.5f - S / 2.f;
+            float dy = (float)y + 0.5f - S / 2.f;
+            float d = std::sqrt(dx * dx + dy * dy);
+            float a = std::clamp(R - d, 0.f, 1.f);
+            unsigned char r, g, b;
+            // Match inner panel: dark navy fill (COL_BG ~ #171A1F) + accent ring
+            // (#5CB0FF = COL_ACCENT). Was: white ring + light-blue fill, which
+            // clashed with the dark UI.
+            if (d > R - RING) { r = 92; g = 176; b = 255; }   // accent ring
+            else { r = 22; g = 25; b = 31; }                  // dark fill
+            size_t i = ((size_t)y * S + x) * 4;
+            data[i] = r; data[i + 1] = g; data[i + 2] = b;
+            data[i + 3] = (unsigned char)(a * 255.f);
+        }
+    }
+    auto* tex = new CCTexture2D();
+    tex->initWithData(data, kCCTexture2DPixelFormat_RGBA8888, S, S, CCSize(S, S));
+    delete[] data;
+    tex->autorelease();
+    return tex;
+}
+
+class EAIBubble : public CCMenu {
+protected:
+    constexpr static float DRAG_SLOP = 8.f;       // finger travel before a press counts as a drag (tap vs drag)
+    constexpr static float TOUCH_RADIUS = 40.f;   // round hit area (bubble visual radius is ~31 px)
+    constexpr static float DIM_OPACITY = 0.5f;    // idle dim target
+    constexpr static float IDLE_DELAY = 5.f;      // seconds untouched before dimming
+
+    CCSprite* m_sprite = nullptr;
+    CCLabelBMFont* m_label = nullptr;
+    CCPoint m_grabOff{};   // finger-minus-sprite offset, so the bubble never jumps
+    CCPoint m_pressPos{};  // finger position at press time (for the slop check)
+    CCPoint m_homePos{};   // sprite position at press time (restored if it was just a tap)
+    float m_opacity = 1.f; // current opacity, eased toward m_opacityTarget
+    float m_opacityTarget = 1.f;
+    float m_idleT = 0.f;   // seconds since last touch
+    bool m_haveMoved = false;
+
+public:
+    // Central rule: the bubble is COMPLETELY hidden while a level is active
+    // (PlayLayer exists) and reappears only after the player exits the level.
+    // Called every frame from both get() (ImGui tick) and update() (cocos
+    // tick) so a missed scheduler tick or a scene-change flash can never
+    // leave it visible mid-attempt.
+    void refreshForScene() {
+        bool inLevel = PlayLayer::get() != nullptr;
+        if (inLevel) {
+            if (isVisible()) setVisible(false);
+            // Reset idle so it comes back fully opaque after the level ends.
+            m_idleT = 0.f;
+            m_opacityTarget = 1.f;
+            m_opacity = 1.f;
+            applyOpacity();
+        } else {
+            if (!isVisible()) {
+                setVisible(true);
+                poke();
+            }
+        }
+    }
+
+    static EAIBubble* get() {
+        static EAIBubble* s_inst = nullptr;
+        if (!s_inst) {
+            s_inst = new EAIBubble();
+            if (s_inst->init()) {
+                // Geode >= 5.10 removed SceneManager/keepAcrossScenes.
+                // Retain the bubble for the app lifetime and re-parent it
+                // to the current scene whenever the scene changes.
+                s_inst->retain();
+            } else {
+                delete s_inst;
+                s_inst = nullptr;
+            }
+        }
+        if (s_inst) {
+            if (auto* cur = CCScene::get()) {
+                if (s_inst->getParent() != cur) {
+                    if (s_inst->getParent())
+                        s_inst->removeFromParentAndCleanup(false);
+                    cur->addChild(s_inst);
+                }
+            }
+            // Enforce hidden-in-level immediately (no 1-frame flash while
+            // waiting for the cocos update() tick).
+            s_inst->refreshForScene();
+        }
+        return s_inst;
+    }
+
+protected:
+    bool init() override {
+        if (!CCMenu::init()) return false;
+        setZOrder(100);
+        setPosition(CCPoint(0, 0));
+        setID("eai-bubble"_spr);
+        // Explicit: this node lives or dies by raw touches, make sure no
+        // GD/CCMenu default ever leaves it touch-disabled on some version.
+        setTouchEnabled(true);
+        setEnabled(true);
+        scheduleUpdate();
+
+        m_sprite = CCSprite::createWithTexture(eaiMakeBubbleTexture());
+        m_sprite->setScale(0.55f);   // 112 px art -> ~62 px on screen (compact, in the 55-65 px band)
+        CCSize win = CCDirector::get()->getWinSize();
+        m_sprite->setPosition(clampPos(CCPoint(
+            (float)editoraiGetSavedInt("eai-bubble-cx", 40),
+            (float)editoraiGetSavedInt("eai-bubble-cy",
+                (int64_t)(win.height - 120))
+        )));
+        this->addChild(m_sprite);
+
+        m_label = CCLabelBMFont::create("AI", "bigFont.fnt");
+        m_label->setScale(0.8f);
+        CCSize ss = m_sprite->getContentSize();
+        m_label->setPosition(CCPoint(ss.width / 2.f, ss.height / 2.f));
+        m_sprite->addChild(m_label);
+
+        if (auto* scene = CCScene::get())
+            scene->addChild(this);
+        return true;
+    }
+
+    CCPoint clampPos(CCPoint p) {
+        CCSize win = CCDirector::get()->getWinSize();
+        constexpr float R = 33.f;   // visual radius ~31 + 2 px margin
+        p.x = std::clamp(p.x, R, std::max(R, win.width - R));
+        p.y = std::clamp(p.y, R, std::max(R, win.height - R));
+        return p;
+    }
+
+    // Any touch (re)starts the idle clock at full opacity.
+    void poke() {
+        m_idleT = 0.f;
+        m_opacityTarget = 1.f;
+    }
+
+    void applyOpacity() {
+        auto o = (GLubyte)(m_opacity * 255);
+        m_sprite->setOpacity(o);
+        m_label->setOpacity(o);
+    }
+
+    void update(float dt) override {
+        // Hidden completely inside any level — invisible, eats no taps.
+        // refreshForScene() is the single source of truth (also called from
+        // get() every ImGui frame); update() just drives the idle-dim when
+        // visible.
+        refreshForScene();
+        if (!isVisible()) return;
+        m_idleT += dt;
+        if (m_idleT >= IDLE_DELAY) m_opacityTarget = DIM_OPACITY;
+        if (m_opacity != m_opacityTarget) {
+            float step = dt * 3.f;
+            m_opacity += std::clamp(m_opacityTarget - m_opacity, -step, step);
+            applyOpacity();
+        }
+    }
+
+    bool ccTouchBegan(CCTouch* touch, CCEvent*) override {
+        if (!isVisible()) return false;
+        if (PlayLayer::get()) return false; // belt & suspenders: never eat taps in-level
+        CCPoint p = convertToNodeSpace(touch->getLocation());
+        CCPoint sp = m_sprite->getPosition();
+        if (ccpDistance(p, sp) > TOUCH_RADIUS) return false;
+        m_haveMoved = false;
+        m_pressPos = p;
+        m_homePos = sp;   // restore point if the finger lifts as a tap (kills tremble jump)
+        m_grabOff = CCPoint(p.x - sp.x, p.y - sp.y);
+        poke();
+        return true;   // claim the touch — it started inside the bubble
+    }
+
+    void ccTouchMoved(CCTouch* touch, CCEvent*) override {
+        // Follow the finger from the very first pixel so drag feels instant
+        // (single press-and-move, no double-tap). The slop only decides at
+        // release time whether this gesture was a tap or a drag.
+        CCPoint p = convertToNodeSpace(touch->getLocation());
+        if (!m_haveMoved && ccpDistance(p, m_pressPos) >= DRAG_SLOP)
+            m_haveMoved = true;
+        poke();
+        m_sprite->setPosition(clampPos(CCPoint(p.x - m_grabOff.x, p.y - m_grabOff.y)));
+    }
+
+    void ccTouchEnded(CCTouch*, CCEvent*) override {
+        if (m_haveMoved) {
+            CCPoint sp = m_sprite->getPosition();
+            editoraiSetSavedInt("eai-bubble-cx", (int64_t)sp.x);
+            editoraiSetSavedInt("eai-bubble-cy", (int64_t)sp.y);
+        } else {
+            // Pure tap: undo any sub-slop tremble shift, then toggle panel.
+            m_sprite->setPosition(m_homePos);
+            g_st.panelOpen = !g_st.panelOpen;
+        }
+        poke();
+    }
+
+    void ccTouchCancelled(CCTouch*, CCEvent*) override {
+        // A cancelled gesture (system interruption, notification shade,
+        // multi-touch preemption, ...) is NOT a tap and NOT a completed
+        // drag: never toggle the panel and never persist a mid-drag bubble
+        // position. Just roll back to the pre-press position and clear the
+        // active-touch state.
+        if (m_sprite) m_sprite->setPosition(m_homePos);
+        m_haveMoved = false;
+        poke();
+    }
+
+    void registerWithTouchDispatcher() override {
+        // Very high priority + swallow: touches starting on the bubble reach
+        // it first; anything outside passes through untouched.
+        CCTouchDispatcher::get()->addTargetedDelegate(this, -1000, true);
+    }
+};
+#endif
+
 void drawOverlay() {
     float dt = ImGui::GetIO().DeltaTime;
     if (!g_themeLoaded) loadTheme();
@@ -2035,19 +2345,15 @@ void drawOverlay() {
         editoraiPersistSessionsIfDirty();
     }
 
-    // Floating bubble — the touch-device way in (no E key there). Hidden
-    // during gameplay: an always-on window would eat taps in its rect, and
-    // mid-attempt is never the moment.
-    if (uiMobile() && !PlayLayer::get()) {
-        ImGui::SetNextWindowPos(ImVec2(8, 60), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("##eaibubble", nullptr,
-                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-                ImGuiWindowFlags_NoCollapse)) {
-            if (ImGui::Button("AI", ImVec2(44, 44)))
-                g_st.panelOpen = !g_st.panelOpen;
-        }
-        ImGui::End();
-    }
+    // Floating bubble — the touch-device way in (no E key there). This is a
+    // NATIVE cocos button (Eclipse-style targeted touch delegate, created
+    // below), not an ImGui window: ImGui's touch emulation only delivers
+    // hover on the first tap, which forced a double-press before any drag.
+    // Raw touches drag from the very first press. Hidden completely inside
+    // levels, draggable (position saved), auto-dims to 50% after 5 s idle.
+#ifdef GEODE_IS_MOBILE
+    EAIBubble::get();
+#endif
 
     // "Go to level" — a finished generation is waiting for its target level.
     // Tiny, pinned bottom-right, never over GD's own corner buttons; inert
@@ -2185,13 +2491,26 @@ void drawOverlay() {
         else
             ImGui::TextColored(COL_DIM, "idle");
 
-        // Right-aligned dismiss hint, out of the reading path.
-        std::string hint = uiMobile()
-            ? std::string("bubble / X hides")
+        // Right-aligned dismiss hint, out of the reading path. On touch
+        // screens the title-bar X is too small to hit reliably and the
+        // full-screen panel has no other way out, so mobile also gets a
+        // big dedicated close button.
+        std::string hint = mobile
+            ? std::string("bubble hides")
             : fmt::format("{} hides", keySeqDisplayName(overlayToggleSeq()));
-        float hw = ImGui::CalcTextSize(hint.c_str()).x;
+        float btnW = mobile ? 56.f : 0.f;
+        float gap  = mobile ? 8.f : 0.f;
+        float hw = ImGui::CalcTextSize(hint.c_str()).x + btnW + gap;
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 20.f,
                                  ImGui::GetContentRegionMax().x - hw));
+        if (mobile) {
+            if (ImGui::Button("X##eai-close", ImVec2(btnW, 34.f))) {
+                g_st.panelOpen = false;
+                g_keyCapture = false;
+            }
+            tipIfHovered("Hide the panel (the AI bubble brings it back).");
+            ImGui::SameLine(0.f, gap);
+        }
         ImGui::TextColored(ImVec4(COL_DIM.x, COL_DIM.y, COL_DIM.z, 0.65f),
                            "%s", hint.c_str());
     }
