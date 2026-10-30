@@ -58,4 +58,5 @@ Join the [HuggingFace org](https://huggingface.co/EditorAI-Geode/) to publish mo
 
 ## Support
 
-Found a bug or have an idea? [Open an issue](https://github.com/entity12208/editorai/issues).
+Found a bug or have an idea? [Open an issue](https://github.com/entity12208/editorai/issues) or [fork the repository](https://github.com/entity12208/EditorAI/fork).
+You can also check to see if there is a [fork](https://github.com/entity12208/editorai/forks) where the bug is fixed.
